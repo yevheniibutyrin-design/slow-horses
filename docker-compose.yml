@@ -1,0 +1,68 @@
+services:
+  mongo:
+    image: mongo:8
+    container_name: slow-horses-mongo
+    restart: unless-stopped
+    environment:
+      # Init scripts run against this database. Without it they would seed
+      # "test" and the API would read an empty collection.
+      # Same variable as the API's MONGO_DB, so the two can never drift apart.
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-slowhorses}
+    ports:
+      # Exposed so mongosh / Compass can inspect the data from the host.
+      # Collides with a local mongod — change the host port if that happens.
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+      - ./docker/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  api:
+    build: .
+    container_name: slow-horses-api
+    restart: unless-stopped
+    ports:
+      # Container port stays 5000. The host side is overridable because macOS
+      # AirPlay Receiver also listens on 5000 — set API_HOST_PORT in .env if so.
+      - "${API_HOST_PORT:-5000}:5000"
+    environment:
+      PORT: 5000
+      MONGO_URI: ${MONGO_URI:-mongodb://mongo:27017}
+      MONGO_DB: ${MONGO_DB:-slowhorses}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:${API_HOST_PORT:-5000}}
+    depends_on:
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5000/ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    develop:
+      watch:
+        - action: rebuild
+          path: .
+          ignore:
+            - .git/
+            - postman/
+            - README.md
+
+  swagger-ui:
+    image: swaggerapi/swagger-ui:latest
+    container_name: slow-horses-swagger
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    environment:
+      SWAGGER_JSON: /spec/openapi.yaml
+    volumes:
+      - ./docs/openapi.yaml:/spec/openapi.yaml:ro
+
+volumes:
+  mongo-data:
