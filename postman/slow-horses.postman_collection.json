@@ -1,0 +1,192 @@
+{
+  "info": {
+    "name": "Slow Horses Rooms API",
+    "description": "Boilerplate Go + MongoDB API. Run the requests top to bottom: 'Create Room' saves roomId/roomUrl into the environment, so 'Join Room' and 'Delete Room' work without copy-pasting anything.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:5000",
+      "type": "string",
+      "description": "Fallback if no environment is selected."
+    }
+  ],
+  "item": [
+    {
+      "name": "Ping",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{baseUrl}}/ping", "host": ["{{baseUrl}}"], "path": ["ping"] },
+        "description": "Returns OK as plain text if the server is up."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('body is OK', () => pm.expect(pm.response.text().trim()).to.eql('OK'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Get Rooms",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{baseUrl}}/rooms", "host": ["{{baseUrl}}"], "path": ["rooms"] },
+        "description": "All rooms as a JSON array."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('body is an array', () => pm.expect(pm.response.json()).to.be.an('array'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Create Room",
+      "request": {
+        "method": "PUT",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Postman Room\",\n  \"eventId\": \"evt-postman\",\n  \"isStarted\": false,\n  \"isFilled\": false,\n  \"participants\": []\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": { "raw": "{{baseUrl}}/room", "host": ["{{baseUrl}}"], "path": ["room"] },
+        "description": "Creates a room. The server generates id and roomUrl; this request stores both in the environment for the requests below."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 201', () => pm.response.to.have.status(201));",
+              "const r = pm.response.json();",
+              "pm.test('server generated id and roomUrl', () => {",
+              "  pm.expect(r.id).to.be.a('string').and.not.empty;",
+              "  pm.expect(r.roomUrl).to.be.a('string').and.not.empty;",
+              "});",
+              "pm.environment.set('roomId', r.id);",
+              "pm.environment.set('roomUrl', r.roomUrl);",
+              "console.log('saved roomId', r.id);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Join Room",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"id\": \"{{roomId}}\",\n  \"roomUrl\": \"{{roomUrl}}\",\n  \"name\": \"Alice\",\n  \"balance\": {\n    \"usd\": 100,\n    \"chips\": 20\n  }\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": { "raw": "{{baseUrl}}/join", "host": ["{{baseUrl}}"], "path": ["join"] },
+        "description": "Adds a participant using the invite roomUrl saved by 'Create Room'."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('participant was added', () => {",
+              "  const names = pm.response.json().participants.map(p => p.name);",
+              "  pm.expect(names).to.include('Alice');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Join Room (wrong roomUrl -> 403)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"id\": \"{{roomId}}\",\n  \"roomUrl\": \"http://localhost:5000/join/not-the-invite\",\n  \"name\": \"Mallory\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": { "raw": "{{baseUrl}}/join", "host": ["{{baseUrl}}"], "path": ["join"] },
+        "description": "Negative case: the roomUrl is the invite secret, so a mismatch is rejected and nothing is written."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 403', () => pm.response.to.have.status(403));",
+              "pm.test('error explains why', () => pm.expect(pm.response.json().error).to.be.a('string'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Delete Room",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/room/{{roomId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["room", "{{roomId}}"]
+        },
+        "description": "Deletes the room created above. Running it twice returns 404 the second time."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 204', () => pm.response.to.have.status(204));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Get OpenAPI Spec",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{baseUrl}}/openapi.yaml", "host": ["{{baseUrl}}"], "path": ["openapi.yaml"] },
+        "description": "The spec embedded in the binary — importable straight into Postman."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('looks like OpenAPI', () => pm.expect(pm.response.text()).to.include('openapi:'));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env
+.claude
+LICENSE
+README.md
+Makefile
+postman
+docker-compose.yml
+Dockerfile

@@ -1,0 +1,7 @@
+# Local env — never commit real values, see .env.example
+.env
+
+# Build output
+/api
+/bin/
+/out/
