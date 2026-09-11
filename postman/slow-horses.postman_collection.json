@@ -1,25 +1,100 @@
 {
   "info": {
-    "name": "Slow Horses Rooms API",
-    "description": "Boilerplate Go + MongoDB API. Run the requests top to bottom: 'Create Room' saves roomId/roomUrl into the environment, so 'Join Room' and 'Delete Room' work without copy-pasting anything.",
+    "name": "Bet Room Service API",
+    "description": "Drives a full duel in the order the widget does: alice opens a room from a bet she has already placed, bob holds a seat and confirms it with his own, then alice offers a rematch only bob can take.\n\nRun the requests top to bottom \u2014 each one saves what the next needs into the environment. A pre-request script on the collection mints fresh bet references per run, because one bet can belong to at most one room.\n\nAUTHENTICATION: with AUTH_JWT_SECRET unset the server takes the bearer token itself as the caller's identity, which is what makes aliceToken/bobToken/carolToken three different people here. Set the secret and these need to be real HS256 tokens whose `sub` claim identifies the caller.\n\nThe tests assert the three wire-format facts that break the widget silently: success bodies are not enveloped, error bodies use `message` rather than `error`, and every timestamp is epoch milliseconds.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     {
       "key": "baseUrl",
-      "value": "http://localhost:5000",
-      "type": "string",
-      "description": "Fallback if no environment is selected."
+      "value": "http://localhost:5000"
     }
   ],
   "item": [
     {
-      "name": "Ping",
+      "name": "Ping (public)",
       "request": {
         "method": "GET",
         "header": [],
-        "url": { "raw": "{{baseUrl}}/ping", "host": ["{{baseUrl}}"], "path": ["ping"] },
-        "description": "Returns OK as plain text if the server is up."
+        "url": {
+          "raw": "{{baseUrl}}/ping",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "ping"
+          ]
+        },
+        "description": "Liveness. One of only two routes that need no credential."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Limits without a credential -> 401",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/rooms/limits",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rooms",
+            "limits"
+          ]
+        },
+        "description": "Every room route needs a bearer credential: the payload carries no user identifier, so an unauthenticated request cannot be attributed to anyone."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 401', () => pm.response.to.have.status(401));",
+              "const body = pm.response.json();",
+              "// The widget reads body.message and falls back to the HTTP status text.",
+              "pm.test('error body uses message, not error', () => {",
+              "  pm.expect(body.message).to.be.a('string').and.not.empty;",
+              "  pm.expect(body).to.not.have.property('error');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Get limits",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{aliceToken}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rooms/limits",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rooms",
+            "limits"
+          ]
+        },
+        "description": "The caller's duel limits and how many they have played today."
       },
       "event": [
         {
@@ -28,45 +103,433 @@
             "type": "text/javascript",
             "exec": [
               "pm.test('status is 200', () => pm.response.to.have.status(200));",
-              "pm.test('body is OK', () => pm.expect(pm.response.text().trim()).to.eql('OK'));"
+              "const body = pm.response.json();",
+              "pm.test('reports a per-duel max and today\\'s count', () => {",
+              "  pm.expect(body.perDuelMax).to.be.a('number');",
+              "  pm.expect(body.playedToday).to.be.a('number');",
+              "});"
             ]
           }
         }
       ]
     },
     {
-      "name": "Get Rooms",
+      "name": "1. Create room (alice)",
       "request": {
-        "method": "GET",
-        "header": [],
-        "url": { "raw": "{{baseUrl}}/rooms", "host": ["{{baseUrl}}"], "path": ["rooms"] },
-        "description": "All rooms as a JSON array."
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('status is 200', () => pm.response.to.have.status(200));",
-              "pm.test('body is an array', () => pm.expect(pm.response.json()).to.be.an('array'));"
-            ]
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{aliceToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
           }
-        }
-      ]
-    },
-    {
-      "name": "Create Room",
-      "request": {
-        "method": "PUT",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rooms",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rooms"
+          ]
+        },
+        "description": "Alice opens a duel from a bet she has ALREADY placed \u2014 betRef is required, because creation places the bet before the room exists. The server derives capacity from the strategy and the figures from the stake and the two prices.",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"name\": \"Postman Room\",\n  \"eventId\": \"evt-postman\",\n  \"isStarted\": false,\n  \"isFilled\": false,\n  \"participants\": []\n}",
-          "options": { "raw": { "language": "json" } }
+          "raw": "{\n  \"eventId\": \"{{eventId}}\",\n  \"strategy\": \"duel\",\n  \"participant\": {\n    \"label\": \"Maksym K.\",\n    \"initials\": \"MK\",\n    \"balances\": {\n      \"eur\": 75.5\n    }\n  },\n  \"betRef\": {\n    \"id\": \"{{creatorBetId}}\",\n    \"number\": 12345\n  },\n  \"expiresAt\": {{expiresAt}},\n  \"payload\": {\n    \"marketId\": \"total_goals\",\n    \"marketItemId\": \"total_goals_2.5\",\n    \"creatorSide\": {\n      \"outcomeId\": \"over\",\n      \"odd\": 182,\n      \"placement\": {\n        \"stake\": 10.0,\n        \"lineItemId\": \"li-12\",\n        \"dataVersion\": 7\n      }\n    },\n    \"opponentSide\": {\n      \"outcomeId\": \"under\",\n      \"odd\": 205\n    },\n    \"figures\": {\n      \"payout\": 0,\n      \"entry\": 0,\n      \"pot\": 0\n    }\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// Collection-scoped values, minted once here rather than on the collection:",
+              "// a collection-level pre-request script runs before EVERY request, which",
+              "// would change eventId between the create and the list that looks for it.",
+              "// One bet can belong to at most one room, so every run needs fresh",
+              "// references or the second pass hits the idempotency index.",
+              "const stamp = Date.now();",
+              "pm.environment.set('creatorBetId', 'bet-postman-' + stamp + '-a');",
+              "pm.environment.set('joinerBetId', 'bet-postman-' + stamp + '-b');",
+              "pm.environment.set('rematchBetId', 'bet-postman-' + stamp + '-c');",
+              "pm.environment.set('eventId', 'evt-postman-' + stamp);",
+              "// expiresAt is epoch MILLISECONDS, never RFC3339.",
+              "pm.environment.set('expiresAt', stamp + 30 * 60 * 1000);"
+            ]
+          }
         },
-        "url": { "raw": "{{baseUrl}}/room", "host": ["{{baseUrl}}"], "path": ["room"] },
-        "description": "Creates a room. The server generates id and roomUrl; this request stores both in the environment for the requests below."
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 201', () => pm.response.to.have.status(201));",
+              "const room = pm.response.json();",
+              "pm.test('body is the room itself, not an envelope', () => {",
+              "  pm.expect(room).to.not.have.property('data');",
+              "  pm.expect(room.id).to.be.a('string').and.not.empty;",
+              "});",
+              "pm.test('timestamps are epoch milliseconds', () => {",
+              "  pm.expect(room.createdAt).to.be.a('number').and.be.above(1e12);",
+              "  pm.expect(room.expiresAt).to.be.a('number').and.be.above(1e12);",
+              "});",
+              "pm.test('figures are derived: 10.00 at 1.82 vs 2.05', () => {",
+              "  pm.expect(room.payload.figures.payout).to.eql(18.2);",
+              "  pm.expect(room.payload.figures.entry).to.eql(8.87);",
+              "  pm.expect(room.payload.figures.pot).to.eql(18.87);",
+              "});",
+              "pm.test('the reader is told which participant they are', () => {",
+              "  pm.expect(room.viewerParticipantId).to.eql(room.participants[0].id);",
+              "});",
+              "pm.test('an invite code and a HOST-side link were issued', () => {",
+              "  pm.expect(room.inviteCode).to.be.a('string').and.not.empty;",
+              "  pm.expect(room.inviteUrl).to.include('betRoomId=' + room.id);",
+              "  pm.expect(room.inviteUrl).to.include('betRoomInvite=' + room.inviteCode);",
+              "});",
+              "pm.environment.set('roomId', room.id);",
+              "pm.environment.set('inviteCode', room.inviteCode);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Read room (stranger, no code) -> 403",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{carolToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rooms/{{roomId}}/read",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rooms",
+            "{{roomId}}",
+            "read"
+          ]
+        },
+        "description": "A caller who is neither a participant nor a code holder cannot read a room.",
+        "body": {
+          "mode": "raw",
+          "raw": "{}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 403', () => pm.response.to.have.status(403));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Read room (code holder)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{bobToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rooms/{{roomId}}/read",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rooms",
+            "{{roomId}}",
+            "read"
+          ]
+        },
+        "description": "POST, not GET: the invite code is a join secret and a query string is the one place it must never appear. A code holder who has not taken a seat gets no viewerParticipantId \u2014 there is no participant of theirs to name.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"inviteCode\": \"{{inviteCode}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const room = pm.response.json();",
+              "pm.test('a code holder is not yet a participant', () => {",
+              "  pm.expect(room.viewerParticipantId).to.be.undefined;",
+              "  pm.expect(room.participants).to.have.lengthOf(1);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. List open rooms on the event (bob)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{bobToken}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rooms?eventId={{eventId}}&status=open",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rooms"
+          ],
+          "query": [
+            {
+              "key": "eventId",
+              "value": "{{eventId}}"
+            },
+            {
+              "key": "status",
+              "value": "open"
+            }
+          ]
+        },
+        "description": "Open rooms on an event, excluding the caller's own and every rematch. The invite code IS returned here: listing a duel on an event is the offer to anyone viewing it, so without the code nothing on the list could be taken."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const rooms = pm.response.json();",
+              "pm.test('alice\\'s duel is listed, with its code', () => {",
+              "  const found = rooms.find(r => r.id === pm.environment.get('roomId'));",
+              "  pm.expect(found, 'the duel was not listed').to.not.be.undefined;",
+              "  pm.expect(found.inviteCode).to.be.a('string').and.not.empty;",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. List open rooms (alice) \u2014 her own are excluded",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{aliceToken}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rooms?eventId={{eventId}}&status=open",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rooms"
+          ],
+          "query": [
+            {
+              "key": "eventId",
+              "value": "{{eventId}}"
+            },
+            {
+              "key": "status",
+              "value": "open"
+            }
+          ]
+        },
+        "description": "The caller's own rooms never appear in their own list."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('empty array, not an error and not null', () => {",
+              "  pm.expect(pm.response.json()).to.eql([]);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Reserve seat, wrong code -> 403",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{bobToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rooms/{{roomId}}/seat",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rooms",
+            "{{roomId}}",
+            "seat"
+          ]
+        },
+        "description": "Possession of the invite code is the sole authorisation to take a seat.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"inviteCode\": \"WRONGCOD\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 403', () => pm.response.to.have.status(403));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Reserve seat, creator's own room -> 409",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{aliceToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rooms/{{roomId}}/seat",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rooms",
+            "{{roomId}}",
+            "seat"
+          ]
+        },
+        "description": "The creator cannot occupy a second seat in their own room.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"inviteCode\": \"{{inviteCode}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 409', () => pm.response.to.have.status(409));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "8. Reserve seat (bob)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{bobToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rooms/{{roomId}}/seat",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rooms",
+            "{{roomId}}",
+            "seat"
+          ]
+        },
+        "description": "Joining is two steps: the seat has to be bob's before any bet exists, or a rejected join leaves him a stake he never asked to place on its own. The hold is returned to him alone; everyone else sees the room as reserved.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"inviteCode\": \"{{inviteCode}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
       },
       "event": [
         {
@@ -75,31 +538,102 @@
             "type": "text/javascript",
             "exec": [
               "pm.test('status is 201', () => pm.response.to.have.status(201));",
-              "const r = pm.response.json();",
-              "pm.test('server generated id and roomUrl', () => {",
-              "  pm.expect(r.id).to.be.a('string').and.not.empty;",
-              "  pm.expect(r.roomUrl).to.be.a('string').and.not.empty;",
+              "const hold = pm.response.json();",
+              "pm.test('a hold with an epoch-ms expiry', () => {",
+              "  pm.expect(hold.id).to.be.a('string').and.not.empty;",
+              "  pm.expect(hold.expiresAt).to.be.a('number').and.be.above(1e12);",
               "});",
-              "pm.environment.set('roomId', r.id);",
-              "pm.environment.set('roomUrl', r.roomUrl);",
-              "console.log('saved roomId', r.id);"
+              "pm.environment.set('holdId', hold.id);"
             ]
           }
         }
       ]
     },
     {
-      "name": "Join Room",
+      "name": "9. Reserve the held seat (carol) -> 409",
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{carolToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rooms/{{roomId}}/seat",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rooms",
+            "{{roomId}}",
+            "seat"
+          ]
+        },
+        "description": "A held seat is not offered to anyone else while the hold is live.",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"id\": \"{{roomId}}\",\n  \"roomUrl\": \"{{roomUrl}}\",\n  \"name\": \"Alice\",\n  \"balance\": {\n    \"usd\": 100,\n    \"chips\": 20\n  }\n}",
-          "options": { "raw": { "language": "json" } }
+          "raw": "{\n  \"inviteCode\": \"{{inviteCode}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 409', () => pm.response.to.have.status(409));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "10. Confirm seat (bob)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{bobToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rooms/{{roomId}}/seat/{{holdId}}/confirm",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rooms",
+            "{{roomId}}",
+            "seat",
+            "{{holdId}}",
+            "confirm"
+          ]
         },
-        "url": { "raw": "{{baseUrl}}/join", "host": ["{{baseUrl}}"], "path": ["join"] },
-        "description": "Adds a participant using the invite roomUrl saved by 'Create Room'."
+        "description": "Bob's bet now exists, so the room records it. `odd` and `placement` are the proposed addition for gap G1 \u2014 without them the room cannot record what he actually staked or at what price, and the service cannot derive either, because he is placed at the REPRICED acceptance-time odd.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"participant\": {\n    \"label\": \"Ivan P.\",\n    \"initials\": \"IP\",\n    \"balances\": {\n      \"eur\": 40\n    }\n  },\n  \"betRef\": {\n    \"id\": \"{{joinerBetId}}\",\n    \"number\": 12346\n  },\n  \"odd\": 205,\n  \"placement\": {\n    \"stake\": 8.87,\n    \"lineItemId\": \"li-99\",\n    \"dataVersion\": 9\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
       },
       "event": [
         {
@@ -108,9 +642,14 @@
             "type": "text/javascript",
             "exec": [
               "pm.test('status is 200', () => pm.response.to.have.status(200));",
-              "pm.test('participant was added', () => {",
-              "  const names = pm.response.json().participants.map(p => p.name);",
-              "  pm.expect(names).to.include('Alice');",
+              "const room = pm.response.json();",
+              "pm.test('the room is filled with both participants', () => {",
+              "  pm.expect(room.status).to.eql('filled');",
+              "  pm.expect(room.participants).to.have.lengthOf(2);",
+              "});",
+              "pm.test('each side carries its OWN stake', () => {",
+              "  pm.expect(room.payload.creatorSide.placement.stake).to.eql(10);",
+              "  pm.expect(room.payload.opponentSide.placement.stake).to.eql(8.87);",
               "});"
             ]
           }
@@ -118,17 +657,40 @@
       ]
     },
     {
-      "name": "Join Room (wrong roomUrl -> 403)",
+      "name": "11. Rematch (alice)",
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{aliceToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rooms/{{roomId}}/rematch",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rooms",
+            "{{roomId}}",
+            "rematch"
+          ]
+        },
+        "description": "A rematch is a NEW duel restricted to the opponent of the one it came from. The service resolves that opponent itself \u2014 the payload carries no cross-room identity for it to be told. betRef is REQUIRED; the shipped widget client drops it (gap G2), so this route 400s from the widget today.",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"id\": \"{{roomId}}\",\n  \"roomUrl\": \"http://localhost:5000/join/not-the-invite\",\n  \"name\": \"Mallory\"\n}",
-          "options": { "raw": { "language": "json" } }
-        },
-        "url": { "raw": "{{baseUrl}}/join", "host": ["{{baseUrl}}"], "path": ["join"] },
-        "description": "Negative case: the roomUrl is the invite secret, so a mismatch is rejected and nothing is written."
+          "raw": "{\n  \"participant\": {\n    \"label\": \"Maksym K.\",\n    \"initials\": \"MK\",\n    \"balances\": {\n      \"eur\": 65\n    }\n  },\n  \"betRef\": {\n    \"id\": \"{{rematchBetId}}\",\n    \"number\": 12400\n  },\n  \"payload\": {\n    \"marketId\": \"total_goals\",\n    \"marketItemId\": \"total_goals_2.5\",\n    \"creatorSide\": {\n      \"outcomeId\": \"over\",\n      \"odd\": 182,\n      \"placement\": {\n        \"stake\": 10.0,\n        \"lineItemId\": \"li-12\",\n        \"dataVersion\": 7\n      }\n    },\n    \"opponentSide\": {\n      \"outcomeId\": \"under\",\n      \"odd\": 205\n    },\n    \"figures\": {\n      \"payout\": 0,\n      \"entry\": 0,\n      \"pot\": 0\n    }\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
       },
       "event": [
         {
@@ -136,24 +698,139 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('status is 403', () => pm.response.to.have.status(403));",
-              "pm.test('error explains why', () => pm.expect(pm.response.json().error).to.be.a('string'));"
+              "pm.test('status is 201', () => pm.response.to.have.status(201));",
+              "const room = pm.response.json();",
+              "pm.test('descends from the original duel', () => {",
+              "  pm.expect(room.rematchOfRoomId).to.eql(pm.environment.get('roomId'));",
+              "  pm.expect(room.status).to.eql('open');",
+              "});",
+              "pm.environment.set('rematchRoomId', room.id);",
+              "pm.environment.set('rematchInviteCode', room.inviteCode);"
             ]
           }
         }
       ]
     },
     {
-      "name": "Delete Room",
+      "name": "12. Rematch seat (carol, has the code) -> 403",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{carolToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rooms/{{rematchRoomId}}/seat",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rooms",
+            "{{rematchRoomId}}",
+            "seat"
+          ]
+        },
+        "description": "Carol holds the code and is still refused: a rematch is joinable only by the original opponent, not by whoever opens the link first.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"inviteCode\": \"{{rematchInviteCode}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 403', () => pm.response.to.have.status(403));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "13. Rematch seat (bob, the opponent)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{bobToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rooms/{{rematchRoomId}}/seat",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rooms",
+            "{{rematchRoomId}}",
+            "seat"
+          ]
+        },
+        "description": "Bob was the other participant of the original duel, so the seat is his.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"inviteCode\": \"{{rematchInviteCode}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 201', () => pm.response.to.have.status(201));",
+              "pm.environment.set('rematchHoldId', pm.response.json().id);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "14. Release the rematch seat (bob)",
       "request": {
         "method": "DELETE",
-        "header": [],
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{bobToken}}"
+          }
+        ],
         "url": {
-          "raw": "{{baseUrl}}/room/{{roomId}}",
-          "host": ["{{baseUrl}}"],
-          "path": ["room", "{{roomId}}"]
+          "raw": "{{baseUrl}}/rooms/{{rematchRoomId}}/seat/{{rematchHoldId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rooms",
+            "{{rematchRoomId}}",
+            "seat",
+            "{{rematchHoldId}}"
+          ]
         },
-        "description": "Deletes the room created above. Running it twice returns 404 the second time."
+        "description": "Releasing reopens the seat at once rather than waiting out the TTL. Idempotent: releasing again is still a 204."
       },
       "event": [
         {
@@ -168,12 +845,20 @@
       ]
     },
     {
-      "name": "Get OpenAPI Spec",
+      "name": "Get OpenAPI spec (public)",
       "request": {
         "method": "GET",
         "header": [],
-        "url": { "raw": "{{baseUrl}}/openapi.yaml", "host": ["{{baseUrl}}"], "path": ["openapi.yaml"] },
-        "description": "The spec embedded in the binary — importable straight into Postman."
+        "url": {
+          "raw": "{{baseUrl}}/openapi.yaml",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "openapi.yaml"
+          ]
+        },
+        "description": "The served spec. Needs no credential."
       },
       "event": [
         {
@@ -181,8 +866,7 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('status is 200', () => pm.response.to.have.status(200));",
-              "pm.test('looks like OpenAPI', () => pm.expect(pm.response.text()).to.include('openapi:'));"
+              "pm.test('status is 200', () => pm.response.to.have.status(200));"
             ]
           }
         }
