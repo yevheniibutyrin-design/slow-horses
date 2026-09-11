@@ -10,7 +10,7 @@ BASE_URL ?= http://localhost:$(API_HOST_PORT)
 # Reused module cache so containerised go commands stay fast.
 GO_RUN = docker run --rm -v "$(PWD)":/src -w /src -v slow-horses-gomod:/go/pkg/mod $(GO_IMAGE)
 
-.PHONY: help up down restart logs ps watch reseed tidy vet build smoke mongosh
+.PHONY: help up down restart logs ps watch reseed tidy vet build test smoke mongosh
 
 help: ## Show available targets
 	@grep -hE '^[a-z-]+:.*##' $(firstword $(MAKEFILE_LIST)) | sed 's/:.*##/\t/' | awk -F'\t' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -48,8 +48,15 @@ vet: ## go vet ./... (in a container)
 build: ## go build ./... (in a container)
 	$(GO_RUN) go build ./...
 
+test: ## go test ./... against the compose Mongo (in a container)
+	docker compose up -d mongo
+	@docker run --rm -v "$(PWD)":/src -w /src -v slow-horses-gomod:/go/pkg/mod \
+	  --network "container:$$(docker compose ps -q mongo)" \
+	  -e MONGO_TEST_URI=mongodb://localhost:27017 \
+	  $(GO_IMAGE) go test ./...
+
 mongosh: ## Open a mongo shell on the application database
 	docker compose exec mongo mongosh $(MONGO_DB)
 
-smoke: ## Exercise every endpoint against a running stack
+smoke: ## Drive a full duel against a running stack
 	@./scripts/smoke.sh $(BASE_URL)

@@ -1,20 +1,56 @@
 # Slow Horses — Go + MongoDB API boilerplate
 
-A minimal Go backend with MongoDB, running entirely in Docker. Five endpoints exist to prove the
-setup works end to end: the server boots, Mongo is reachable, and reads/writes against the `rooms`
-collection succeed. No framework, two dependencies (MongoDB driver + `google/uuid`).
+A Go + MongoDB service, running entirely in Docker, serving the **bet room** API the
+`@sport-widgets/bet-room` widget calls. A bet room turns one two-way market into a head-to-head
+contest between two players; the room coordinates them and **never holds, moves or settles money** —
+both sides are ordinary sportsbook single bets and the room stores a reference to each.
+
+No framework, two dependencies (MongoDB driver + `google/uuid`).
 
 ## The `rooms` contract
 
 | Field | Type | Notes |
 |---|---|---|
 | `id` | uuid string | Stored directly as Mongo's `_id` — no second identifier |
-| `name` | string | |
-| `participants` | array of `{ name: string, balance: object }` | `balance` is free-form; stored as sent |
-| `isFilled` | boolean | A stored flag, not derived — there is no capacity field in the contract |
-| `isStarted` | boolean | |
-| `eventId` | string | |
-| `roomUrl` | string | Generated on create as `{PUBLIC_BASE_URL}/join/{id}`; acts as the invite secret |
+| `eventId` | string | The sportsbook event; rooms are discoverable by it |
+| `strategy` | `"duel"` | Declares capacity, eligibility and settlement interpretation |
+| `status` | enum | `open` · `reserved` · `filled` · `expired` · `settled` · `void` — one explicit value, never independent booleans |
+| `capacity` | int | Declared by the strategy (2 for `duel`), never read from the request |
+| `participants` | array | `{ id, label, initials, balances, betRef }`. `balances` is free-form and opaque; `betRef` is the room's only link to money |
+| `viewerParticipantId` | string | Which participant the *reading caller* is. Computed per request; labels are not unique, so a reader cannot work this out itself |
+| `inviteCode` | string | The join secret, not derivable from `id` |
+| `inviteUrl` | string | The **host's** event page plus `?betRoomId=…&betRoomInvite=…` — not a URL on this service |
+| `createdAt`, `expiresAt` | int64 | Epoch **milliseconds**, never RFC3339 |
+| `payload` | object | The strategy's own data: the market triple, both sides, and the figures |
+| `rematchOfRoomId` | string | Set on a rematch; the seat is restricted to the original opponent |
+
+Money crosses the wire as a two-decimal JSON number and is stored in minor units. Odds are the feed's
+raw integers — `182` means `1.82`.
+
+## Read this before changing anything
+
+**[`docs/bet-room-api.md`](docs/bet-room-api.md)** is the contract and the reasoning behind it:
+every route, the wire-format facts that break the widget *silently* if you get them wrong, what the
+service owns, and the gaps where the shipped widget and the specs disagree.
+[`docs/openapi.yaml`](docs/openapi.yaml) is the machine-readable form, served at `GET /openapi.yaml`.
+
+The paths are not open for improvement — they are fixed by frontend code that is already merged.
+
+Four things to know up front:
+
+1. **Success bodies are not enveloped, and error bodies use `message`, not `error`.** The widget does
+   `response.json() as T` with no unwrapping, and reads `body.message`; the wrong key silently drops
+   every stated reason and shows an HTTP status line instead.
+2. **Timestamps are epoch milliseconds as JSON numbers**, never RFC3339. Go's `time.Time` default
+   would be a silent break.
+3. **`410 Gone` means expired**, including a lapsed seat hold. `409` is the instinct and produces
+   "already taken" where the truth is "no longer open".
+4. **The invite link points at the host's event page**, not at this service — which is why the old
+   `roomUrl` 404'd in a browser. That link was never this service's to serve.
+
+**Two things are deliberately not implemented**, and the document says so rather than hiding it:
+server-side eligibility re-checks (needs a sportsbook feed) and settlement (needs a settlement
+lookup, so a filled duel stays filled forever).
 
 ## Prerequisites
 
@@ -82,7 +118,7 @@ between runs.
 
 `docker/mongo-init.js` runs through Mongo's `docker-entrypoint-initdb.d`, which executes **only when
 the data directory is empty**. After the first boot, `docker compose up` reuses the volume and
-silently skips seeding — so to get the three dummy rooms back:
+silently skips seeding — so to get the three dummy duels back (one open, one filled, one expired):
 
 ```bash
 make reseed        # = docker compose down -v && docker compose up -d --build
@@ -92,71 +128,146 @@ Inspect the data directly with `make mongosh` (`docker compose exec mongo mongos
 
 ## Endpoints
 
-Base URL `http://localhost:5000`.
+Base URL `http://localhost:5000`. **Every route below needs `Authorization: Bearer <token>`** except
+`GET /ping` and `GET /openapi.yaml`. With `AUTH_JWT_SECRET` unset the token itself is taken as the
+caller's identity, so `Bearer alice` is a user called alice — see [Authentication](#authentication).
 
-### `GET /ping`
+| Route | What it does |
+|---|---|
+| `POST /rooms` | Open a room from a bet the creator has already placed |
+| `GET /rooms?eventId=&status=open` | Open rooms on an event, minus the caller's own and every rematch |
+| `GET /rooms/limits` | The caller's duel limits and how many they have played today |
+| `POST /rooms/{roomId}/read` | Read room state — the route the widget polls |
+| `POST /rooms/{roomId}/seat` | Hold a seat, before the joiner commits anything |
+| `DELETE /rooms/{roomId}/seat/{holdId}` | Release a held seat rather than waiting out its TTL |
+| `POST /rooms/{roomId}/seat/{holdId}/confirm` | Turn the hold into a participant, with the bet placed |
+| `POST /rooms/{roomId}/rematch` | Open a rematch, joinable only by the original opponent |
 
-Liveness check. Returns `200` with the plain-text body `OK`. Does not touch MongoDB.
+Full request and response shapes: [`docs/bet-room-api.md`](docs/bet-room-api.md) §2.
 
-```bash
-curl -i localhost:5000/ping
+### The shape of a duel
+
+Creation and acceptance have **opposite orderings**, and that is the load-bearing part:
+
+```
+  CREATION                                  ACCEPTANCE
+  place the bet (the player chose it)       hold the seat   (short TTL)
+        |                                         |
+        v                                         v
+  create the room with betRef               place the bet (derived stake)
+        |                                         |
+        v                                         v
+  waiting                                   confirm the seat with betRef
+                                                  |
+                                                  v
+                                             matched
 ```
 
-### `GET /rooms`
+A creator's bet that fails to become a duel is an ordinary single bet they chose to place — which is
+exactly what an unaccepted duel decays into anyway. A joiner's bet that fails to become a duel is a
+stake they never asked to place on its own, so their seat must be theirs first.
 
-All rooms as a JSON array (`[]` when empty, never `null`). `200`, or `500` on a database error.
+### `POST /rooms`
 
-```bash
-curl -s localhost:5000/rooms | jq
-```
-
-### `PUT /room`
-
-Creates a room. `id` and `roomUrl` are generated server-side. `201` with the created room; `400` if
-the body is invalid JSON, contains unknown fields, or is missing `name` / `eventId`.
+The creator's bet already exists, so `betRef` is required. The server derives `capacity` from the
+strategy and the figures from the stake and the two prices — it never stores a client's claim about
+money it can compute itself.
 
 ```bash
-curl -s -X PUT localhost:5000/room \
-  -H 'content-type: application/json' \
-  -d '{"name":"Friday Night Table","eventId":"evt-2026-09-04"}' | jq
+curl -s -X POST localhost:5000/rooms \
+  -H 'authorization: Bearer alice' -H 'content-type: application/json' \
+  -d '{"eventId":"evt-ucl-2026-09-15","strategy":"duel",
+       "participant":{"label":"Maksym K.","initials":"MK","balances":{"eur":75.5}},
+       "betRef":{"id":"bet-8812","number":12345},
+       "expiresAt":'"$(( ($(date +%s) + 1800) * 1000 ))"',
+       "payload":{"marketId":"total_goals","marketItemId":"total_goals_2.5",
+         "creatorSide":{"outcomeId":"over","odd":182,
+           "placement":{"stake":10.00,"lineItemId":"li-12","dataVersion":7}},
+         "opponentSide":{"outcomeId":"under","odd":205},
+         "figures":{"payout":0,"entry":0,"pot":0}}}' | jq
 ```
 
-### `DELETE /room/{id}`
-
-Deletes by room UUID. `204` on success, `404` if there was nothing to delete.
-
-```bash
-curl -i -X DELETE localhost:5000/room/<id>
-```
-
-### `POST /join`
-
-Adds a participant to a room. **`roomUrl` is the invite secret**: the participant is only added when
-the `id` *and* the `roomUrl` match the stored room and the room is not already filled. All three
-conditions are part of the database query, so a rejected join never writes anything.
+`10.00` at `1.82` against `2.05` gives `payout 18.20`, `entry 8.87`, `pot 18.87`. The gap between the
+pot and the payout is the book's existing margin on the two prices — not a fee, and the room never
+takes it.
 
 | Status | Meaning |
 |---|---|
-| `200` | Participant added; returns the updated room |
-| `400` | Invalid body, or missing `id` / `roomUrl` / `name` |
-| `403` | `roomUrl` does not match this room's invite |
-| `404` | No room with that `id` |
-| `409` | Room is already filled |
+| `201` | Room created |
+| `200` | This bet already opened a room of yours — a retried create is idempotent |
+| `400` | Unknown strategy, malformed body, missing `betRef`, or an expiry in the past |
+| `409` | Underround prices, a stake over the per-duel max, the daily limit, or another caller's bet |
+
+### `POST /rooms/{roomId}/read`
+
+A POST rather than a GET on purpose: the invite code is a join secret and a query string is the one
+place it must never appear. A participant sends no body; a code holder sends the code.
 
 ```bash
-curl -s -X POST localhost:5000/join \
-  -H 'content-type: application/json' \
-  -d '{"id":"<id>","roomUrl":"<roomUrl>","name":"Alice","balance":{"usd":100,"chips":20}}' | jq
+curl -s -X POST localhost:5000/rooms/<id>/read \
+  -H 'authorization: Bearer alice' -H 'content-type: application/json' -d '{}' | jq
 ```
 
-### `GET /openapi.yaml`
+`200` with the room, or `403` for a caller who is neither a participant nor a code holder.
 
-The spec embedded in the binary, for external tooling.
+### `POST /rooms/{roomId}/seat` and `/confirm`
+
+Seat availability is evaluated **atomically**: two simultaneous requests for a room with one open
+seat result in exactly one hold, because every precondition lives in a single conditional update.
+
+```bash
+# hold a seat — returns {"id":"…","expiresAt":<epoch ms>}
+curl -s -X POST localhost:5000/rooms/<id>/seat \
+  -H 'authorization: Bearer bob' -H 'content-type: application/json' \
+  -d '{"inviteCode":"<code>"}' | jq
+
+# confirm it with the bet that was placed
+curl -s -X POST localhost:5000/rooms/<id>/seat/<holdId>/confirm \
+  -H 'authorization: Bearer bob' -H 'content-type: application/json' \
+  -d '{"participant":{"label":"Ivan P.","initials":"IP","balances":{"eur":40}},
+       "betRef":{"id":"bet-8813","number":12346},
+       "odd":205,
+       "placement":{"stake":8.87,"lineItemId":"li-99","dataVersion":9}}' | jq
+```
+
+| Status | Meaning |
+|---|---|
+| `403` | The invite code does not match, or the hold is someone else's |
+| `409` | Filled, already held, or the creator asking for a second seat |
+| `410` | The room expired, or the hold lapsed — **not** a conflict |
+
+A hold is **not** a participant: it lapses on its own and leaves no trace beyond the seat reopening.
+
+### `POST /rooms/{roomId}/rematch`
+
+A new duel restricted to the other participant of the one it came from. The service resolves that
+opponent itself — the payload carries no cross-room identity for it to be told — so the invite code
+alone does not get a stranger in.
+
+### `GET /ping`, `GET /openapi.yaml`
+
+Liveness and the served spec. The only two routes that need no credential.
 
 ### Smoke test
 
-`./scripts/smoke.sh` (or `make smoke`) runs the whole sequence above against a running stack,
-including the `403` and `404` negative cases, and fails loudly on the first unexpected status.
+`./scripts/smoke.sh` (or `make smoke`) drives a full duel against a running stack: create, list,
+reserve, release, confirm, rematch, plus the `401`/`403`/`409` negative cases, failing loudly on the
+first unexpected status. The Postman collection does the same with assertions on the wire format.
+
+## Authentication
+
+The room contract carries **no user identifier in any payload** — not an id, not an email, not an
+account number. The bearer token is the service's only way to know who is calling, and four rules are
+unenforceable without it: which participant a reader is, that a creator cannot take a second seat,
+that the open-rooms list excludes the caller's own, and that a rematch is joinable only by the
+original opponent.
+
+- **`AUTH_JWT_SECRET` set** — HS256 tokens are verified and the caller is the `sub` claim. The
+  algorithm is pinned rather than read from the token's own header, which is the classic JWT bypass.
+- **unset** — the server runs an **insecure** verifier that takes the token itself as the caller's
+  identity, so `Bearer alice` is a user called alice and anyone can impersonate anyone. It exists so
+  local development, the smoke script and the Postman collection work without a token issuer, and the
+  server logs a warning saying exactly that at startup.
 
 ## Swagger UI
 
@@ -177,11 +288,18 @@ The spec is hand-written and is the single source of truth: there is no code gen
 2. Select the **slow-horses (local docker)** environment (top-right).
 3. Run the collection top to bottom, or open it and hit **Run**.
 
-*Create Room* saves `roomId` and `roomUrl` into the environment, so *Join Room*, *Join Room (wrong
-roomUrl → 403)* and *Delete Room* need no copy-pasting. Every request asserts its expected status
-code, so the Collection Runner is a pass/fail check on the whole API.
+The collection drives a full duel in the order the widget does — alice opens a room, bob holds a
+seat and confirms it, alice offers a rematch only bob can take — saving what each step needs into the
+environment. A pre-request script on the first request mints fresh bet references per run, because
+one bet can belong to at most one room.
 
-With `newman` installed:
+`aliceToken`, `bobToken` and `carolToken` are three different callers: in the server's insecure mode
+the token *is* the identity. Set `AUTH_JWT_SECRET` and they need to be real HS256 tokens.
+
+Beyond the status codes, the tests assert the three wire-format facts that break the widget silently:
+success bodies are not enveloped, error bodies use `message`, and timestamps are epoch milliseconds.
+
+With `newman` installed (`npx newman` works too):
 
 ```bash
 newman run postman/slow-horses.postman_collection.json -e postman/slow-horses.postman_environment.json
@@ -194,7 +312,15 @@ newman run postman/slow-horses.postman_collection.json -e postman/slow-horses.po
 | `API_HOST_PORT` | `5000` | Host port mapped to the container's 5000. Override if something owns 5000 |
 | `MONGO_URI` | `mongodb://mongo:27017` | The compose service name; use `localhost` only from the host |
 | `MONGO_DB` | `slowhorses` | Also drives the seed script's target database, so the two cannot drift. Changing it needs `make reseed` — the existing volume will not seed into a new name |
-| `PUBLIC_BASE_URL` | `http://localhost:5000` | Used to build each room's `roomUrl`; follows `API_HOST_PORT` under compose |
+| `PUBLIC_BASE_URL` | `http://localhost:5000` | This service's own base. **Not** the base for invite links — see below |
+| `AUTH_JWT_SECRET` | *(unset)* | HS256 signing secret. Unset selects the insecure verifier — see [Authentication](#authentication) |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:8081` | Comma-separated allowlist, replacing the boilerplate's `*` |
+| `HOST_EVENT_URL_TEMPLATE` | `http://localhost:3000/event/{eventId}` | Builds `inviteUrl`. The **host's** event page, not this service |
+| `INVITE_WINDOW_MS` | `1800000` | A room's expiry is clamped to it, and the clamp can only shorten what a client asked for |
+| `SEAT_HOLD_TTL_MS` | `90000` | **Unsized** — it must cover a subscription load plus a placement round-trip, and that has never been measured |
+| `DUEL_PER_DUEL_MAX` | `500.00` | Maximum stake per duel |
+| `DUEL_DAILY_LIMIT` | `10` | Duels one caller may open per UTC day |
+| `DUEL_CURRENCY` | `EUR` | Reported by `GET /rooms/limits` |
 
 `.env.example` documents these. Compose interpolates them, so editing `.env` and re-running
 `docker compose up -d` is enough — and the `Makefile` reads the same file, so `make smoke` targets the
@@ -209,13 +335,17 @@ assume it) — change that in `docker-compose.yml`, not `.env`.
 cmd/api/main.go        # wiring: config -> mongo -> router -> server + graceful shutdown
 internal/config/       # environment variables with defaults
 internal/db/           # Mongo connect with a bounded ping retry
-internal/models/       # Room and Participant documents (json + bson tags)
-internal/store/        # the rooms queries; keeps bson out of the handlers
-internal/api/          # router, handlers, middleware, JSON helpers
+internal/models/       # Room, Participant, the duel payload, and Amount (money in minor units)
+internal/duel/         # the entry arithmetic and the underround guard — pure, integer-only
+internal/auth/         # bearer verification: HS256, plus the insecure development fallback
+internal/store/        # the rooms queries, including the atomic seat claim; keeps bson out of the handlers
+                       #   (its own test covers the expiry sweep, which no request path reaches)
+internal/api/          # router, handlers, middleware, JSON helpers, and the integration tests
+docs/bet-room-api.md   # THE CONTRACT: every route, every wire-format constraint, and why
 docs/openapi.yaml      # hand-written spec, embedded and served at /openapi.yaml
 docker/mongo-init.js   # first-boot seed for the rooms collection
 postman/               # collection + environment
-scripts/smoke.sh       # end-to-end curl check
+scripts/smoke.sh       # end-to-end curl check: a full duel
 ```
 
 ## Adding an endpoint
@@ -224,12 +354,20 @@ scripts/smoke.sh       # end-to-end curl check
 2. `internal/store/` — the query, returning `store.ErrNotFound` where it applies.
 3. `internal/api/handlers.go` — the handler, using `writeJSON` / `writeError`.
 4. `internal/api/router.go` — register it: `mux.HandleFunc("GET /thing/{id}", h.getThing)`.
-5. `docs/openapi.yaml` and the Postman collection — kept in sync by hand.
+5. `internal/api/*_test.go` — an integration test against real Mongo. `make test` runs them.
+6. `docs/bet-room-api.md`, `docs/openapi.yaml`, the Postman collection and `scripts/smoke.sh` — all
+   kept in sync by hand.
+
+Two things that are easy to get wrong: declare **every** field a client sends (`decodeJSON` rejects
+unknown ones), and put every precondition of a conditional write into the **filter**, so a request
+that should be refused never writes.
 
 ## Known gotchas
 
-- **The invite link 404s in a browser.** `roomUrl` is `{PUBLIC_BASE_URL}/join/{id}`, but there is no
-  `GET /join/{id}` route — the link is for a future frontend. The API entry point is `POST /join`.
+- **`inviteUrl` points somewhere this service does not serve, and that is correct.** It is the
+  *host's* event page plus `?betRoomId=…&betRoomInvite=…`; the widget reads those off the query
+  string once the host has landed the joiner on the event. Set `HOST_EVENT_URL_TEMPLATE` to something
+  real or the link goes nowhere.
 - **Port 27017 on the host** collides with a local `mongod`. Change the host side of the mapping in
   `docker-compose.yml` or stop the local instance.
 - **Port 5000 on macOS is taken by AirPlay Receiver** (System Settings → General → AirDrop &
@@ -241,17 +379,39 @@ scripts/smoke.sh       # end-to-end curl check
   echo 'API_HOST_PORT=5001' >> .env && docker compose up -d
   ```
 
-  `PUBLIC_BASE_URL` follows `API_HOST_PORT`, so generated `roomUrl` values stay correct. This was hit
-  on the machine this boilerplate was built on — see *Verified on* below.
-- **`PUT /room` is not REST-conventional** (POST would be). It matches the agreed contract on purpose.
+  This was hit on the machine this was built on — see *Verified on* below.
+- **A bet can belong to at most one room.** A unique index makes a retried create idempotent, so
+  re-running the smoke script or the Postman collection needs fresh bet references; both generate
+  them per run.
+- **`POST /rooms/{id}/read` is a POST, not a GET.** The invite code is a join secret and a query
+  string is the one place it must never appear.
+- **Do not give each test its own database.** It reads as the tidy choice and it takes the server
+  down: forty-odd databases per run is forty-odd sets of WiredTiger files, dropped asynchronously
+  while the storage engine holds idle file handles for ten minutes. Past the container's file-
+  descriptor limit mongod does not slow down — it panics mid-`createIndexes` and aborts, which
+  surfaces in Go as `connection closed unexpectedly by the other side`, a message that says nothing
+  about the real cause. Each test binary uses **one** database and empties the collection per test
+  (`TestMain` in `internal/api/testenv_test.go`), and `docker-compose.yml` raises the container's
+  `nofile` limit to the 64000 mongod's own startup warning asks for.
 
 ## Verified on
 
-Everything above was run end to end on macOS (Apple silicon) with Colima as the Docker runtime:
-all three containers healthy, three seeded rooms in `slowhorses.rooms`, and `scripts/smoke.sh` green
-across `200 / 201 / 204 / 400 / 403 / 404 / 405 / 409`. The API was reached on host port 5001 because
-AirPlay Receiver held 5000 (see *Known gotchas*).
+Run end to end on macOS (Apple silicon) with Colima as the Docker runtime: all three containers
+healthy, three seeded duels in `slowhorses.rooms`, `go test ./...` green against a real Mongo
+(including twelve simultaneous claims on one seat producing exactly one hold) over ten consecutive
+runs, `make test` green in a container, `scripts/smoke.sh` green across
+`200 / 201 / 204 / 401 / 403 / 409`, and the Postman collection green at 18 requests and
+32 assertions. The API was reached on host port 5001 because AirPlay Receiver held 5000 (see *Known
+gotchas*).
 
 ## Not included yet
 
-No tests, no auth, no pagination, no CI — deliberate omissions for a first pass.
+- **Server-side eligibility re-checks.** The service cannot tell whether an event has started or
+  whether a market is two-way — that needs a sportsbook feed it does not have. The underround guard
+  *is* enforced, on create and on acceptance, because it is pure arithmetic over stored odds.
+- **Settlement.** Nothing writes `status: settled | void` or `payload.winnerParticipantId`, so a
+  filled duel stays filled forever. That is a worker resolving each participant's `betRef` against
+  the sportsbook's settlement.
+- **Pagination** on the open-rooms list, and **CI**.
+
+`docs/bet-room-api.md` §5.5, §5.6 and §9 size each of these and say what they block.

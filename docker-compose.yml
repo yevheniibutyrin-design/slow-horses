@@ -12,6 +12,14 @@ services:
       # Exposed so mongosh / Compass can inspect the data from the host.
       # Collides with a local mongod — change the host port if that happens.
       - "27017:27017"
+    # Docker's default soft limit of 1024 open files is below what mongod asks
+    # for, and it does not degrade gracefully when it runs out: WiredTiger
+    # panics and the process aborts. The test suite reached it, so this is the
+    # number mongod's own startup warning recommends.
+    ulimits:
+      nofile:
+        soft: 64000
+        hard: 64000
     volumes:
       - mongo-data:/data/db
       - ./docker/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
@@ -35,6 +43,19 @@ services:
       MONGO_URI: ${MONGO_URI:-mongodb://mongo:27017}
       MONGO_DB: ${MONGO_DB:-slowhorses}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:${API_HOST_PORT:-5000}}
+      # Unset by default, which selects the INSECURE verifier: the bearer token
+      # is taken as the caller's identity, so the smoke script and Postman work
+      # without a token issuer. The API logs a warning when that is on.
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-}
+      # An allowlist, not "*". The default is the swagger-ui service below.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8081}
+      # The HOST's event page, not this service — see docs/bet-room-api.md §5.3.
+      HOST_EVENT_URL_TEMPLATE: ${HOST_EVENT_URL_TEMPLATE:-http://localhost:3000/event/{eventId}}
+      INVITE_WINDOW_MS: ${INVITE_WINDOW_MS:-1800000}
+      SEAT_HOLD_TTL_MS: ${SEAT_HOLD_TTL_MS:-90000}
+      DUEL_PER_DUEL_MAX: ${DUEL_PER_DUEL_MAX:-500.00}
+      DUEL_DAILY_LIMIT: ${DUEL_DAILY_LIMIT:-10}
+      DUEL_CURRENCY: ${DUEL_CURRENCY:-EUR}
     depends_on:
       mongo:
         condition: service_healthy
