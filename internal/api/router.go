@@ -40,10 +40,13 @@ func NewRouter(h *Handlers, verifier auth.Verifier, allowedOrigins []string) htt
 	// Outermost first: recover, then log, then CORS (which answers preflights),
 	// then authentication — so a rejected credential is still logged, and a
 	// preflight is answered without needing one.
+	//
+	// The mux is handed to authenticating so it can ask which route a request
+	// resolved to, and thus which ones tolerate an anonymous caller.
 	return chain(mux,
 		recovering,
 		logging,
 		cors(allowedOrigins),
-		authenticating(verifier),
+		authenticating(verifier, mux),
 	)
 }

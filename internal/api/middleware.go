@@ -16,9 +16,13 @@ type subjectKeyType struct{}
 
 var subjectKey subjectKeyType
 
-// subjectFrom returns the authenticated caller for a request. It is present on
-// every route the auth middleware guards, so a handler that reads it on an
-// unguarded route gets "" and should treat that as a programming error.
+// subjectFrom returns the authenticated caller for a request, or "" when there
+// is none.
+//
+// On a guarded route it is always present. On one of the optionalAuthPatterns
+// routes it is present only if the caller sent a usable token, so "" there means
+// an anonymous reader and NOT a programming error — see the note on those
+// patterns about what an empty subject must never be allowed to match.
 func subjectFrom(r *http.Request) string {
 	subject, _ := r.Context().Value(subjectKey).(string)
 	return subject
@@ -58,19 +62,32 @@ func recovering(next http.Handler) http.Handler {
 	})
 }
 
-// cors answers only for origins on the configured allowlist. The boilerplate
-// echoed "*", which is fine for a Swagger UI demo and wrong for a service that
-// carries a bearer credential.
+// cors answers for the configured origins, or for every origin when the list is
+// the single wildcard "*".
 //
 // An origin that is not allowed simply gets no CORS headers back, so the browser
 // refuses the response. The request itself is still served: CORS is a browser
 // policy, not an authorisation check, and pretending otherwise would give a
 // false sense of a boundary.
+//
+// Access-Control-Allow-Credentials is never set, and must not be: a browser
+// rejects it outright alongside "*", and nothing here needs it. The bearer token
+// rides a header the caller sets deliberately, not an ambient cookie, so a
+// cross-origin page cannot have one attached on its behalf.
 func cors(allowedOrigins []string) func(http.Handler) http.Handler {
+	allowAll := slices.Contains(allowedOrigins, "*")
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
-			if origin != "" && slices.Contains(allowedOrigins, origin) {
+			switch {
+			case allowAll:
+				// No Vary: the answer is the same for every origin, so a shared
+				// cache has nothing to get wrong.
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				w.Header().Set("Access-Control-Max-Age", "300")
+			case origin != "" && slices.Contains(allowedOrigins, origin):
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				// The response varies by origin, so a shared cache must not serve
 				// one origin's headers to another.
@@ -92,13 +109,38 @@ func cors(allowedOrigins []string) func(http.Handler) http.Handler {
 // publicPaths need no credential: a liveness probe and the served spec.
 var publicPaths = []string{"/ping", "/openapi.yaml"}
 
+// optionalAuthPatterns are the read-only routes an anonymous caller may reach,
+// so a widget can show a duel before anyone has signed in.
+//
+// A valid token is still honoured on them — a participant reading their own room
+// has to be recognised as one — but its absence is not an error, and neither is
+// a token that does not verify: on these routes an unusable credential reads as
+// no credential rather than a 401.
+//
+// Only reads are listed, and that boundary is load-bearing rather than
+// conservative. Anonymous callers all share the empty subject, so admitting a
+// write here would make one anonymous caller indistinguishable from every other:
+// any of them could release or confirm any other's seat hold. Every rule that
+// turns on WHO is calling — seat ownership, the creator's own rooms being
+// excluded from the open list, the rematch restriction, the daily duel count —
+// still needs a real token. models.ParticipantBySubject already refuses to match
+// on "", which stops an empty subject from ever reading as a participant.
+//
+// These are ServeMux patterns compared against the pattern the mux itself
+// resolved, not hand-matched path shapes, so they cannot drift out of step with
+// the routes registered in NewRouter.
+var optionalAuthPatterns = []string{
+	"GET /rooms",
+	"POST /rooms/{roomId}/read",
+}
+
 // authenticating resolves the caller from the bearer token and puts the subject
 // on the request context.
 //
-// Every room route needs it, because the room contract carries no user
-// identifier in any payload — the token is the only caller identity the service
-// gets. A request without a valid one is a 401 and nothing is created or changed.
-func authenticating(verifier auth.Verifier) func(http.Handler) http.Handler {
+// Guarded routes need it, because the room contract carries no user identifier
+// in any payload — the token is the only caller identity the service gets. A
+// request without a valid one is a 401 and nothing is created or changed.
+func authenticating(verifier auth.Verifier, mux *http.ServeMux) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if slices.Contains(publicPaths, r.URL.Path) {
@@ -106,15 +148,29 @@ func authenticating(verifier auth.Verifier) func(http.Handler) http.Handler {
 				return
 			}
 
+			// Ask the mux which route this is. An unmatched path resolves to the
+			// 404 handler with an empty pattern, which is on no list and so still
+			// demands a credential — the default stays closed.
+			_, pattern := mux.Handler(r)
+			optional := slices.Contains(optionalAuthPatterns, pattern)
+
 			// The token travels only in this header. Never read it from a query
 			// string or a body: both are logged and cached where a header is not.
 			token, ok := auth.BearerToken(r.Header.Get("Authorization"))
 			if !ok {
+				if optional {
+					next.ServeHTTP(w, r)
+					return
+				}
 				writeError(w, http.StatusUnauthorized, codeUnauthorised, "a bearer credential is required")
 				return
 			}
 			subject, err := verifier.Subject(token)
 			if err != nil {
+				if optional {
+					next.ServeHTTP(w, r)
+					return
+				}
 				// The reason is deliberately not distinguished to the caller.
 				writeError(w, http.StatusUnauthorized, codeUnauthorised, "the bearer credential is not valid")
 				return

@@ -126,6 +126,16 @@ paths:
           schema:
             type: string
             enum: [open]
+      security:
+        - bearerAuth: []
+        - {}
+      description: |
+        No credential is required, so an event's open duels are visible to a
+        spectator who has not signed in. A signed-in caller additionally gets
+        `inviteCode` and `inviteUrl` on each room, which is what reserving a seat
+        needs; both are omitted for an anonymous one, who could not act on them
+        anyway and would otherwise be able to harvest every open code on an event
+        in one request. The caller's own rooms and all rematch rooms are excluded.
       responses:
         "200":
           description: Open rooms on the event, possibly empty
@@ -135,8 +145,6 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Room"
-        "401":
-          $ref: "#/components/responses/Unauthorised"
         "500":
           $ref: "#/components/responses/Error"
 
@@ -178,12 +186,24 @@ paths:
         POST, not GET: the invite code is a join secret and must never reach a
         query string. A participant reads without a code; a code holder supplies one.
 
+        No credential is required: a room is observable, so a widget can render a
+        duel to a spectator who has not signed in. What the credential changes is
+        WHAT comes back. `inviteCode` and `inviteUrl` are returned only to a
+        participant or to a caller who presented the correct code — the url embeds
+        the code as `betRoomInvite`, so the two are disclosed together or not at
+        all. Every other reader gets room state with both fields absent, which
+        keeps a scraped room id from being worth as much as a code. Taking a seat
+        still requires a token.
+
         The response must set `viewerParticipantId` for the caller — a reader
         cannot otherwise identify their own side, and matching on the display label
         is unsafe because labels are not unique.
 
         This is the polled route and dominates request volume: ~5s while waiting,
         ~30s while matched, nothing in terminal states.
+      security:
+        - bearerAuth: []
+        - {}
       parameters:
         - $ref: "#/components/parameters/RoomId"
       requestBody:
@@ -203,14 +223,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Room"
-        "401":
-          $ref: "#/components/responses/Unauthorised"
-        "403":
-          description: The caller is neither a participant nor a code holder.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":

@@ -204,7 +204,7 @@
       ]
     },
     {
-      "name": "2. Read room (stranger, no code) -> 403",
+      "name": "2. Read room (stranger, no code) -> 200 without the secret",
       "request": {
         "method": "POST",
         "header": [
@@ -228,7 +228,7 @@
             "read"
           ]
         },
-        "description": "A caller who is neither a participant nor a code holder cannot read a room.",
+        "description": "A caller who is neither a participant nor a code holder still reads the room: rooms are observable. What they do NOT get is inviteCode or inviteUrl -- the url embeds the code as betRoomInvite, so the two are withheld together, and a scraped room id never becomes a way to take the seat.",
         "body": {
           "mode": "raw",
           "raw": "{}",
@@ -245,7 +245,16 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('status is 403', () => pm.response.to.have.status(403));"
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('room state is readable', () => {",
+              "  pm.expect(body).to.have.property('status');",
+              "  pm.expect(body).to.have.property('participants');",
+              "});",
+              "pm.test('the invite secret is withheld', () => {",
+              "  pm.expect(body.inviteCode, 'inviteCode').to.be.undefined;",
+              "  pm.expect(body.inviteUrl, 'inviteUrl').to.be.undefined;",
+              "});"
             ]
           }
         }

@@ -259,18 +259,31 @@ func TestReadRoom(t *testing.T) {
 		}
 	})
 
-	t.Run("stranger without a code is forbidden", func(t *testing.T) {
-		res := e.do(http.MethodPost, "/rooms/"+room.ID+"/read", "carol", nil)
-		if res.status != http.StatusForbidden {
-			t.Errorf("status = %d, want 403; body: %s", res.status, res.body)
+	// A stranger may now WATCH the room -- that is what makes it observable --
+	// but gets neither the code nor the url that embeds it, so watching never
+	// turns into a way to take the seat.
+	t.Run("stranger without a code reads state but not the secret", func(t *testing.T) {
+		var got models.Room
+		e.decode(e.do(http.MethodPost, "/rooms/"+room.ID+"/read", "carol", nil), http.StatusOK, &got)
+		if got.InviteCode != "" || got.InviteURL != "" {
+			t.Errorf("stranger got inviteCode %q and inviteUrl %q, want both absent",
+				got.InviteCode, got.InviteURL)
+		}
+		if got.ViewerParticipantID != "" {
+			t.Errorf("viewerParticipantId = %q, want it absent for a stranger", got.ViewerParticipantID)
+		}
+		if got.Status != room.Status {
+			t.Errorf("status = %q, want the room's real status %q", got.Status, room.Status)
 		}
 	})
 
-	t.Run("wrong code is forbidden", func(t *testing.T) {
-		res := e.do(http.MethodPost, "/rooms/"+room.ID+"/read", "carol",
-			map[string]any{"inviteCode": "WRONGCOD"})
-		if res.status != http.StatusForbidden {
-			t.Errorf("status = %d, want 403; body: %s", res.status, res.body)
+	t.Run("wrong code is treated as no code", func(t *testing.T) {
+		var got models.Room
+		e.decode(e.do(http.MethodPost, "/rooms/"+room.ID+"/read", "carol",
+			map[string]any{"inviteCode": "WRONGCOD"}), http.StatusOK, &got)
+		if got.InviteCode != "" || got.InviteURL != "" {
+			t.Errorf("a wrong code still yielded inviteCode %q and inviteUrl %q, want both absent",
+				got.InviteCode, got.InviteURL)
 		}
 	})
 

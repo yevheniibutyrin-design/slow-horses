@@ -27,8 +27,10 @@ type Config struct {
 	// without a token issuer. Startup logs a warning in that mode.
 	AuthJWTSecret []byte
 
-	// CORSAllowedOrigins replaces the boilerplate's "*". An origin not on this
-	// list gets no CORS headers back, so a browser refuses the response.
+	// CORSAllowedOrigins lists the browser origins allowed to read responses. An
+	// origin not on it gets no CORS headers back, so a browser refuses the
+	// response. The single entry "*" allows every origin, which is the MVP
+	// default; narrow it to real origins before this serves anything private.
 	CORSAllowedOrigins []string
 
 	// HostEventURLTemplate builds an invite link. The link points at the HOST's
@@ -68,7 +70,7 @@ func Load() Config {
 		PublicBaseURL: strings.TrimSuffix(env("PUBLIC_BASE_URL", "http://localhost:5000"), "/"),
 
 		AuthJWTSecret:      []byte(os.Getenv("AUTH_JWT_SECRET")),
-		CORSAllowedOrigins: splitList(env("CORS_ALLOWED_ORIGINS", "http://localhost:8081")),
+		CORSAllowedOrigins: splitList(env("CORS_ALLOWED_ORIGINS", "*")),
 
 		HostEventURLTemplate: env("HOST_EVENT_URL_TEMPLATE", "http://localhost:3000/event/{eventId}"),
 

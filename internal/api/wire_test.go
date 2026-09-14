@@ -3,8 +3,12 @@ package api_test
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/yevheniibutyrin-design/slow-horses/internal/api"
+	"github.com/yevheniibutyrin-design/slow-horses/internal/auth"
 )
 
 // The three wire-format facts below live in the widget's transport layer rather
@@ -133,17 +137,18 @@ func TestCallerSubjectNeverLeaks(t *testing.T) {
 	}
 }
 
-// Every room route needs a credential. The payload carries no identifier, so an
-// unauthenticated request cannot be attributed to anyone and must change nothing.
-func TestEveryRoomRouteRequiresACredential(t *testing.T) {
+// Every route that WRITES, or that answers "what have I done", still needs a
+// credential. The payload carries no identifier, so an unauthenticated request
+// cannot be attributed to anyone and must change nothing.
+//
+// The two read routes are deliberately absent: see the anonymous tests below.
+func TestEveryRoomWriteRouteRequiresACredential(t *testing.T) {
 	e := newEnv(t)
 	room := e.createRoom("alice", "evt-1")
 
 	routes := []struct{ method, path string }{
 		{http.MethodPost, "/rooms"},
-		{http.MethodGet, "/rooms?eventId=evt-1&status=open"},
 		{http.MethodGet, "/rooms/limits"},
-		{http.MethodPost, "/rooms/" + room.ID + "/read"},
 		{http.MethodPost, "/rooms/" + room.ID + "/seat"},
 		{http.MethodDelete, "/rooms/" + room.ID + "/seat/hold-1"},
 		{http.MethodPost, "/rooms/" + room.ID + "/seat/hold-1/confirm"},
@@ -159,13 +164,102 @@ func TestEveryRoomRouteRequiresACredential(t *testing.T) {
 	}
 }
 
-func TestMalformedAuthorizationHeaderIsUnauthorised(t *testing.T) {
+// A spectator with no credential can read a room and list the open ones, so a
+// widget can render a duel before anyone has signed in.
+func TestReadRoutesAllowAnAnonymousCaller(t *testing.T) {
 	e := newEnv(t)
+	room := e.createRoom("alice", "evt-1")
+
+	read := e.do(http.MethodPost, "/rooms/"+room.ID+"/read", "", map[string]any{})
+	if read.status != http.StatusOK {
+		t.Fatalf("anonymous read status = %d, want 200; body: %s", read.status, read.body)
+	}
+
+	list := e.do(http.MethodGet, "/rooms?eventId=evt-1&status=open", "", nil)
+	if list.status != http.StatusOK {
+		t.Errorf("anonymous list status = %d, want 200; body: %s", list.status, list.body)
+	}
+}
+
+// The open-rooms list discloses invite codes to callers who can act on them. An
+// anonymous one cannot -- taking a seat needs a token -- so handing codes over
+// here would only let a scraper harvest every open code on an event in a single
+// unauthenticated request, defeating the gating on the read route.
+func TestAnonymousListHidesInviteCodes(t *testing.T) {
+	e := newEnv(t)
+	room := e.createRoom("alice", "evt-1")
+
+	anon := e.do(http.MethodGet, "/rooms?eventId=evt-1&status=open", "", nil)
+	if anon.status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", anon.status, anon.body)
+	}
+	if !strings.Contains(string(anon.body), room.ID) {
+		t.Fatalf("precondition: the open duel was not listed at all: %s", anon.body)
+	}
+	if strings.Contains(string(anon.body), room.InviteCode) {
+		t.Errorf("the anonymous list leaked an invite code: %s", anon.body)
+	}
+
+	// A signed-in viewer still gets it, because they can act on it. It is bob's
+	// list, not alice's: a caller's own rooms are excluded from their own list.
+	bob := e.do(http.MethodGet, "/rooms?eventId=evt-1&status=open", "bob", nil)
+	if !strings.Contains(string(bob.body), room.InviteCode) {
+		t.Errorf("a signed-in viewer was not given the invite code: %s", bob.body)
+	}
+}
+
+// The invite code is the secret that authorises taking the seat. A reader who is
+// neither a participant nor already holding it must not be handed it, or a
+// scraped room id would be worth as much as a code.
+func TestAnonymousReadHidesTheInviteCode(t *testing.T) {
+	e := newEnv(t)
+	room := e.createRoom("alice", "evt-1")
+	if room.InviteCode == "" {
+		t.Fatal("precondition: the created room has no invite code to hide")
+	}
+
+	anon := e.do(http.MethodPost, "/rooms/"+room.ID+"/read", "", map[string]any{})
+	if anon.status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", anon.status, anon.body)
+	}
+	if strings.Contains(string(anon.body), room.InviteCode) {
+		t.Errorf("anonymous read leaked the invite code: %s", anon.body)
+	}
+
+	// The participant still gets it back, because sharing the invite needs it.
+	owner := e.do(http.MethodPost, "/rooms/"+room.ID+"/read", "alice", map[string]any{})
+	if !strings.Contains(string(owner.body), room.InviteCode) {
+		t.Errorf("the room's own creator was not given the invite code: %s", owner.body)
+	}
+
+	// So does a caller who presented the code, who plainly already has it.
+	holder := e.do(http.MethodPost, "/rooms/"+room.ID+"/read", "", map[string]any{
+		"inviteCode": room.InviteCode,
+	})
+	if !strings.Contains(string(holder.body), room.InviteCode) {
+		t.Errorf("a code holder was not given the invite code back: %s", holder.body)
+	}
+}
+
+// On an open route an unusable credential reads as no credential rather than a
+// 401 — but it must never be mistaken for a real subject.
+func TestMalformedAuthorizationIsAnonymousOnOpenRoutesAndUnauthorisedOnGuardedOnes(t *testing.T) {
+	e := newEnv(t)
+	room := e.createRoom("alice", "evt-1")
+
 	for _, header := range []string{"Basic abc", "abc", "Bearer", "Bearer "} {
 		t.Run(header, func(t *testing.T) {
-			res := e.doWithRawAuth(http.MethodGet, "/rooms/limits", header)
-			if res.status != http.StatusUnauthorized {
-				t.Errorf("status = %d for Authorization %q, want 401", res.status, header)
+			guarded := e.doWithRawAuth(http.MethodGet, "/rooms/limits", header)
+			if guarded.status != http.StatusUnauthorized {
+				t.Errorf("guarded route status = %d for Authorization %q, want 401", guarded.status, header)
+			}
+
+			open := e.doWithRawAuth(http.MethodPost, "/rooms/"+room.ID+"/read", header)
+			if open.status != http.StatusOK {
+				t.Errorf("open route status = %d for Authorization %q, want 200", open.status, header)
+			}
+			if strings.Contains(string(open.body), room.InviteCode) {
+				t.Errorf("Authorization %q was treated as a participant: %s", header, open.body)
 			}
 		})
 	}
@@ -183,8 +277,9 @@ func TestPublicRoutesNeedNoCredential(t *testing.T) {
 	}
 }
 
-// CORS is an allowlist now, not "*". An unknown origin gets no headers back, so
-// a browser refuses the response.
+// A configured allowlist still behaves as one: an unknown origin gets no headers
+// back, so a browser refuses the response. "*" is the default, not the only mode
+// — see TestCORSWildcardAnswersEveryOrigin.
 func TestCORSAnswersOnlyAllowedOrigins(t *testing.T) {
 	e := newEnv(t)
 
@@ -201,5 +296,34 @@ func TestCORSAnswersOnlyAllowedOrigins(t *testing.T) {
 	denied := e.doWithOrigin(http.MethodGet, "/ping", "https://evil.example")
 	if got := denied.header.Get("Access-Control-Allow-Origin"); got != "" {
 		t.Errorf("denied origin got Access-Control-Allow-Origin %q, want none", got)
+	}
+}
+
+// Configured with "*", every origin is answered, including ones nobody listed.
+//
+// This needs no database, so it builds its own server rather than going through
+// newEnv, which skips when Mongo is unreachable.
+func TestCORSWildcardAnswersEveryOrigin(t *testing.T) {
+	server := httptest.NewServer(api.NewRouter(&api.Handlers{}, auth.InsecureVerifier{}, []string{"*"}))
+	t.Cleanup(server.Close)
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/ping", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Origin", "https://anywhere.example")
+	res, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("send request: %v", err)
+	}
+	defer res.Body.Close()
+
+	if got := res.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want %q", got, "*")
+	}
+	// A browser rejects "*" outright when credentials are allowed, so this header
+	// must stay absent for the wildcard to work at all.
+	if got := res.Header.Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Errorf("Access-Control-Allow-Credentials = %q, want none alongside \"*\"", got)
 	}
 }

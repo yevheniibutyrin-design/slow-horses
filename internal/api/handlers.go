@@ -73,6 +73,9 @@ func (h *Handlers) openAPI(w http.ResponseWriter, _ *http.Request) {
 //   - The seat hold and the permitted-subject restriction are stripped. A hold
 //     belongs to its joiner alone; to everyone else it is visible only as the
 //     reserved status.
+//   - showInviteCode gates the join secret in BOTH the places it appears: the
+//     inviteCode field and the inviteUrl that embeds it. Pass false for a reader
+//     who is neither a participant nor already holding the code.
 //
 // Participant subjects are `json:"-"` and so never serialise; a test asserts it.
 func (h *Handlers) roomView(room models.Room, subject string, showInviteCode bool) models.Room {
@@ -86,6 +89,10 @@ func (h *Handlers) roomView(room models.Room, subject string, showInviteCode boo
 	}
 	if !showInviteCode {
 		view.InviteCode = ""
+		// The invite URL carries the same code as its betRoomInvite parameter, so
+		// clearing one without the other hands the secret over anyway. Both are
+		// omitempty, so they simply vanish from the response.
+		view.InviteURL = ""
 	}
 	if view.Participants == nil {
 		view.Participants = []models.Participant{}
