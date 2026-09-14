@@ -375,15 +375,21 @@ func (h *Handlers) listOpenRooms(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The invite code IS returned here. Listing a duel on an event is the offer
-	// to anyone viewing that event, so the disclosure is deliberate: without it
-	// the idle list could show a duel nobody on the list could take. The code
-	// stays the secret for the invite-link flow, and rematch rooms are excluded
-	// from this query entirely, so the one genuinely restricted case is
-	// unaffected. See `docs/bet-room-api.md` §2.5.
+	// The invite code IS returned here, but only to a caller who could act on it.
+	// Listing a duel on an event is the offer to anyone viewing that event, so
+	// the disclosure is deliberate: without it the idle list could show a duel
+	// nobody on the list could take. Rematch rooms are excluded from this query
+	// entirely, so the one genuinely restricted case is unaffected. See
+	// `docs/bet-room-api.md` §2.5.
+	//
+	// An anonymous viewer is the exception, and has to be: taking a seat needs a
+	// token, so a code they cannot use buys them nothing — while handing it over
+	// would let a scraper harvest every open code on an event with one
+	// unauthenticated request. That would defeat the same secret being withheld
+	// on POST /rooms/{roomId}/read. They see the duel and can sign in to take it.
 	views := make([]models.Room, 0, len(rooms))
 	for _, room := range rooms {
-		views = append(views, h.roomView(room, subject, true))
+		views = append(views, h.roomView(room, subject, subject != ""))
 	}
 	writeJSON(w, http.StatusOK, views)
 }
@@ -445,14 +451,15 @@ func (h *Handlers) readRoom(w http.ResponseWriter, r *http.Request) {
 	subject := subjectFrom(r)
 	_, isParticipant := room.ParticipantBySubject(subject)
 	holdsCode := room.InviteCode != "" && trimmed(req.InviteCode) == room.InviteCode
-	if !isParticipant && !holdsCode {
-		writeError(w, http.StatusForbidden, codeForbidden,
-			"you are neither a participant of this room nor a holder of its invite code")
-		return
-	}
-	// A code holder already has the code, and a participant needs it to share the
-	// invite, so returning it here tells neither of them anything new.
-	writeJSON(w, http.StatusOK, h.roomView(room, subject, true))
+
+	// Room state is readable by anyone holding the id, signed in or not, so a
+	// widget can render a duel to a spectator. The invite code is NOT: it is the
+	// secret that authorises taking the seat, so handing it to every reader would
+	// make an id worth as much as a code and let anyone who scraped one join.
+	//
+	// A participant needs it back to share the invite, and a code holder sent it
+	// in, so returning it to those two tells neither of them anything new.
+	writeJSON(w, http.StatusOK, h.roomView(room, subject, isParticipant || holdsCode))
 }
 
 // ---------------------------------------------------------------------------

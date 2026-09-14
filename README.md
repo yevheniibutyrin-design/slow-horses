@@ -129,8 +129,13 @@ Inspect the data directly with `make mongosh` (`docker compose exec mongo mongos
 ## Endpoints
 
 Base URL `http://localhost:5000`. **Every route below needs `Authorization: Bearer <token>`** except
-`GET /ping` and `GET /openapi.yaml`. With `AUTH_JWT_SECRET` unset the token itself is taken as the
-caller's identity, so `Bearer alice` is a user called alice — see [Authentication](#authentication).
+`GET /ping`, `GET /openapi.yaml`, and the two read routes — `GET /rooms` and
+`POST /rooms/{roomId}/read` — where a token is optional so a room is observable without signing in.
+Sending one there still matters: only a participant or a caller who presents the correct invite code
+gets `inviteCode` and `inviteUrl` back. Every route that writes still requires a token, because an
+anonymous caller has no identity to attribute a seat to. With `AUTH_JWT_SECRET` unset the token
+itself is taken as the caller's identity, so `Bearer alice` is a user called alice — see
+[Authentication](#authentication).
 
 | Route | What it does |
 |---|---|
@@ -273,9 +278,10 @@ original opponent.
 
 http://localhost:8081 — served by the `swagger-ui` container, reading `docs/openapi.yaml` from a
 read-only mount. "Try it out" posts to `http://localhost:5000` (the single `servers:` entry in the
-spec), which works because the API ships a permissive CORS middleware. **That CORS policy is
-`Access-Control-Allow-Origin: *` and is for local development only** — tighten it before this goes
-anywhere real.
+spec), which works because `CORS_ALLOWED_ORIGINS` defaults to `*`. **That default answers every
+origin and is for local development only** — set it to a real comma-separated allowlist before this
+goes anywhere real. `Access-Control-Allow-Credentials` is never sent, which is what keeps `*` legal
+for a browser and keeps an ambient cookie from ever authenticating a cross-origin caller.
 
 The spec is hand-written and is the single source of truth: there is no code generation, so **edit
 `docs/openapi.yaml` by hand whenever a route changes**. The `servers:` dropdown lists `:5000` and
@@ -314,7 +320,7 @@ newman run postman/slow-horses.postman_collection.json -e postman/slow-horses.po
 | `MONGO_DB` | `slowhorses` | Also drives the seed script's target database, so the two cannot drift. Changing it needs `make reseed` — the existing volume will not seed into a new name |
 | `PUBLIC_BASE_URL` | `http://localhost:5000` | This service's own base. **Not** the base for invite links — see below |
 | `AUTH_JWT_SECRET` | *(unset)* | HS256 signing secret. Unset selects the insecure verifier — see [Authentication](#authentication) |
-| `CORS_ALLOWED_ORIGINS` | `http://localhost:8081` | Comma-separated allowlist, replacing the boilerplate's `*` |
+| `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated allowlist, or `*` for every origin (the MVP default). Narrow it before this serves anything private |
 | `HOST_EVENT_URL_TEMPLATE` | `http://localhost:3000/event/{eventId}` | Builds `inviteUrl`. The **host's** event page, not this service |
 | `INVITE_WINDOW_MS` | `1800000` | A room's expiry is clamped to it, and the clamp can only shorten what a client asked for |
 | `SEAT_HOLD_TTL_MS` | `90000` | **Unsized** — it must cover a subscription load plus a placement round-trip, and that has never been measured |

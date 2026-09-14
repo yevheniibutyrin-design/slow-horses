@@ -93,10 +93,24 @@ case "$BODY" in
 esac
 echo "   -> figures: payout 18.20, entry 8.87, pot 18.87"
 
-say "POST /rooms/{id}/read — a stranger with no code -> 403"
+say "POST /rooms/{id}/read — a stranger with no code watches, but gets no secret"
 call POST "/rooms/$ROOM/read" carol-smoke '{}'
 status "$STATUS"; echo "$BODY"
-[ "$STATUS" = "403" ] || fail "expected 403"
+[ "$STATUS" = "200" ] || fail "expected 200 — a room is observable without a credential"
+case "$BODY" in
+  *'"inviteCode"'*) fail "the stranger was handed the invite code" ;;
+esac
+case "$BODY" in
+  *'"inviteUrl"'*) fail "the stranger was handed the invite url, which embeds the code" ;;
+esac
+echo "   -> state readable, inviteCode and inviteUrl both withheld"
+
+say "POST /rooms/{id}/read — no Authorization header at all"
+STATUS="$(curl -sS -o /tmp/sh-body -w '%{http_code}' -X POST "$BASE/rooms/$ROOM/read" \
+  -H 'content-type: application/json' -d '{}')"
+status "$STATUS"
+[ "$STATUS" = "200" ] || fail "expected 200 — an anonymous caller may read a room"
+echo "   -> anonymous read works"
 
 say "POST /rooms/{id}/read — alice reads her own room"
 call POST "/rooms/$ROOM/read" "$ALICE" '{}'

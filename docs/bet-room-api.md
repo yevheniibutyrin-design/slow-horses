@@ -103,7 +103,7 @@ renders as "duels are temporarily unavailable" `[widget]` — the wrong sentence
 |---|---|---|
 | 400 / 422 | `validation` | unknown strategy `[lifecycle]`, malformed body, missing `betRef` |
 | 401 | `unauthorised` | missing or invalid bearer token `[lifecycle]` |
-| 403 | `forbidden` | wrong invite code `[lifecycle]`; non-participant without code reads `[lifecycle]`; confirming a hold that belongs to another user `[lifecycle]`; rematch reserved by a non-opponent `[duel]` |
+| 403 | `forbidden` | wrong invite code on a seat claim `[lifecycle]`; confirming a hold that belongs to another user `[lifecycle]`; rematch reserved by a non-opponent `[duel]` |
 | 404 | `notFound` | unknown room `[lifecycle]`, unknown hold |
 | 409 | `conflict` | room filled `[lifecycle]`; seat already held `[lifecycle]`; creator taking a second seat `[lifecycle]`; underround at acceptance `[duel]`; daily limit reached `[widget]` |
 | **410** | `expired` | room past `expiresAt` `[lifecycle]`; hold lapsed `[lifecycle]`; **event has started** `[duel]` — *not enforced, see §5.5* |
@@ -336,7 +336,10 @@ Must set `viewerParticipantId` for the caller (§5.1): the readable state has to
 participant they are, because matching on the display label is not sufficient — labels are not unique
 `[lifecycle]`.
 
-A caller who is neither a participant nor a code holder → 403 `[lifecycle]`.
+A caller who is neither a participant nor a code holder still reads the room — it is observable, and
+an anonymous spectator is the point — but `inviteCode` and `inviteUrl` are withheld, so watching
+never becomes a way to take the seat. The url embeds the code as `betRoomInvite`, so the two are
+disclosed together or not at all.
 
 **This route dominates the service's request volume.** Clients observe state changes by re-reading;
 the service must not require a persistent connection `[lifecycle]`. The widget's cadence `[design]`:
@@ -368,10 +371,18 @@ The idle state lists other players' open duels and offers taking the other side 
 reserving a seat needs the code (§2.2), which `[lifecycle]` calls the sole authorisation to take a
 seat. Those two cannot both be literally true.
 
-**Resolved in favour of the list.** Listing a duel on an event *is* the offer to anyone viewing that
-event, so returning the code is a deliberate disclosure rather than a leak. The code remains the
-secret for the invite-link flow, and the rematch exclusion above keeps the one genuinely restricted
-case unaffected.
+**Resolved in favour of the list, for callers who can act on it.** Listing a duel on an event *is*
+the offer to anyone viewing that event, so returning the code is a deliberate disclosure rather than
+a leak. The code remains the secret for the invite-link flow, and the rematch exclusion above keeps
+the one genuinely restricted case unaffected.
+
+**An anonymous caller is the exception.** This route no longer requires a credential, so the "anyone
+viewing that event" the decision above was written for has widened from *any signed-in user* to
+*anyone at all* — and that premise change is what the exception answers. `inviteCode` and
+`inviteUrl` are omitted for a caller with no token. Taking a seat still requires one, so a code they
+cannot use buys them nothing, while returning it would let a scraper harvest every open code on an
+event in a single unauthenticated request — and would defeat the same secret being withheld on
+§2.4. An anonymous viewer sees the duel and signs in to take it.
 
 > **Consequence, stated so nobody "fixes" it later.** Any authenticated caller who can list an event
 > can then reserve a seat in any room on that list, and `POST /rooms/{roomId}/seat` has no way to
@@ -551,7 +562,7 @@ Returned by routes 1, 3, 4, 5 and 6.
 | `capacity` | Declared by the strategy, not by the request. 2 for `duel`. |
 | `participants` | **Confirmed participants only.** A live hold is not listed here `[types]`. |
 | `viewerParticipantId` | Omitted for a code holder who has not taken a seat `[types]`. |
-| `inviteCode` | Omitted unless the caller may hold it — see §2.5 for when they may. |
+| `inviteCode` | Omitted unless the caller may hold it — see §2.5 for when they may. `inviteUrl` embeds the same code as `betRoomInvite`, so the two are disclosed together or withheld together. |
 | `inviteUrl` | A **host** URL, not a service URL. See §5.3. |
 | `createdAt`, `expiresAt` | Epoch **milliseconds** (§1.3). |
 | `rematchOfRoomId` | Present only on a rematch. |
@@ -763,7 +774,8 @@ from the widget.
 
 ### G3 — the open-duels list vs. the invite secret — **RESOLVED**
 
-The list returns `inviteCode`. Decision and its consequence in §2.5.
+The list returns `inviteCode` to a signed-in caller, and omits it for an anonymous one. Decision and
+its consequence in §2.5.
 
 ### G4 — no release-seat route *(service + frontend)*
 
@@ -810,7 +822,7 @@ safe; another caller's bet is a 409.
 |---|---|---|
 | `internal/api/respond.go` | `{"error": …}` | `{"message": …, "code": …}`, unwrapped success bodies, HTML escaping off (§1.2) |
 | `internal/api/router.go` | 6 routes, no auth | the eight routes; `recovering → logging → cors → authenticating` |
-| `internal/api/middleware.go` | CORS `*` | CORS allowlist; bearer auth putting the caller's subject on the request context, with `/ping` and `/openapi.yaml` public |
+| `internal/api/middleware.go` | CORS `*` | CORS allowlist, or `*` when configured with it; bearer auth putting the caller's subject on the request context, with `/ping` and `/openapi.yaml` public and the two read routes accepting an anonymous caller |
 | `internal/auth/` | — | **new**: HS256 verification (stdlib only, algorithm pinned) plus the insecure development verifier |
 | `internal/duel/` | — | **new**: the entry arithmetic and the underround guard, pure and integer-only |
 | `internal/models/money.go` | — | **new**: `Amount`, money in minor units, JSON as a two-decimal number |
