@@ -70,7 +70,9 @@ type placementRequest struct {
 }
 
 type sideRequest struct {
-	OutcomeID string            `json:"outcomeId"`
+	// The selection keys are the model types directly: plain data with matching
+	// JSON tags and no server-assigned fields, so there is nothing to strip.
+	OutcomeID models.OutcomeKey `json:"outcomeId"`
 	Odd       int               `json:"odd"`
 	Placement *placementRequest `json:"placement"`
 }
@@ -82,14 +84,50 @@ type figuresRequest struct {
 }
 
 type duelPayloadRequest struct {
-	MarketID     string         `json:"marketId"`
-	MarketItemID string         `json:"marketItemId"`
-	CreatorSide  sideRequest    `json:"creatorSide"`
-	OpponentSide sideRequest    `json:"opponentSide"`
-	Figures      figuresRequest `json:"figures"`
+	MarketID     models.MarketModel   `json:"marketId"`
+	MarketItemID models.MarketItemKey `json:"marketItemId"`
+	CreatorSide  sideRequest          `json:"creatorSide"`
+	OpponentSide sideRequest          `json:"opponentSide"`
+	Figures      figuresRequest       `json:"figures"`
 	// WinnerParticipantID is accepted and ignored: it is written only by
 	// settlement, which no route performs.
 	WinnerParticipantID string `json:"winnerParticipantId"`
+}
+
+// emptyOutcome reports whether an outcome key is the unmarshalled form of an
+// absent field — all zero. A real outcome always names a type.
+func emptyOutcome(o models.OutcomeKey) bool {
+	return o.Type == 0 && len(o.Values) == 0
+}
+
+// sameOutcome compares two outcome keys. A struct holding a slice is not
+// comparable with ==, and reflect.DeepEqual would read nil and empty as
+// different when to the widget they are the same absence of parameters.
+func sameOutcome(a, b models.OutcomeKey) bool {
+	if a.Type != b.Type || len(a.Values) != len(b.Values) {
+		return false
+	}
+	for i := range a.Values {
+		if a.Values[i] != b.Values[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// stringList normalises a nil slice to an empty one. A nil slice marshals to JSON
+// null, and the widget compares these lists by JSON.stringify — null never
+// equals [], so a room stored nil would fail to resolve its own market.
+func stringList(v []string) []string {
+	if v == nil {
+		return []string{}
+	}
+	return v
+}
+
+// outcome is stringList applied to an outcome key's values.
+func outcome(o models.OutcomeKey) models.OutcomeKey {
+	return models.OutcomeKey{Type: o.Type, Values: stringList(o.Values)}
 }
 
 // decodeDuelPayload reads the strategy payload out of the raw message the outer
@@ -110,18 +148,17 @@ func decodeDuelPayload(raw json.RawMessage) (models.DuelPayload, string) {
 		return models.DuelPayload{}, "payload is not valid for strategy duel: " + err.Error()
 	}
 
+	// There is deliberately no presence check on marketItemId: an empty
+	// marketParameters is what a parameterless market such as 1X2 legitimately
+	// sends, so the absent and the valid forms are indistinguishable here.
 	switch {
-	case trimmed(req.MarketID) == "":
-		return models.DuelPayload{}, "payload.marketId is required"
-	case trimmed(req.MarketItemID) == "":
-		// The selection is a triple. A market holds many items, so a market id
-		// alone cannot tell Over 2.5 from Over 3.5.
-		return models.DuelPayload{}, "payload.marketItemId is required"
-	case trimmed(req.CreatorSide.OutcomeID) == "":
+	case trimmed(req.MarketID.EventID) == "":
+		return models.DuelPayload{}, "payload.marketId.eventId is required"
+	case emptyOutcome(req.CreatorSide.OutcomeID):
 		return models.DuelPayload{}, "payload.creatorSide.outcomeId is required"
-	case trimmed(req.OpponentSide.OutcomeID) == "":
+	case emptyOutcome(req.OpponentSide.OutcomeID):
 		return models.DuelPayload{}, "payload.opponentSide.outcomeId is required"
-	case req.CreatorSide.OutcomeID == req.OpponentSide.OutcomeID:
+	case sameOutcome(req.CreatorSide.OutcomeID, req.OpponentSide.OutcomeID):
 		return models.DuelPayload{}, "the two sides of a duel must be different outcomes"
 	case req.CreatorSide.Odd < duel.MinRawOdd:
 		return models.DuelPayload{}, "payload.creatorSide.odd must be a raw integer price of at least 100 (1.00)"
@@ -135,11 +172,17 @@ func decodeDuelPayload(raw json.RawMessage) (models.DuelPayload, string) {
 		return models.DuelPayload{}, "payload.creatorSide.placement.stake must be positive"
 	}
 
+	// eventId is the one free-text field left in the selection keys, trimmed like
+	// every other string this contract stores.
+	marketID := req.MarketID
+	marketID.EventID = trimmed(marketID.EventID)
+	marketItemID := models.MarketItemKey{MarketParameters: stringList(req.MarketItemID.MarketParameters)}
+
 	payload := models.DuelPayload{
-		MarketID:     trimmed(req.MarketID),
-		MarketItemID: trimmed(req.MarketItemID),
+		MarketID:     marketID,
+		MarketItemID: marketItemID,
 		CreatorSide: models.Side{
-			SideOffer: models.SideOffer{OutcomeID: trimmed(req.CreatorSide.OutcomeID), Odd: req.CreatorSide.Odd},
+			SideOffer: models.SideOffer{OutcomeID: outcome(req.CreatorSide.OutcomeID), Odd: req.CreatorSide.Odd},
 			Placement: &models.SidePlacement{
 				Stake:       req.CreatorSide.Placement.Stake,
 				LineItemID:  trimmed(req.CreatorSide.Placement.LineItemID),
@@ -147,7 +190,7 @@ func decodeDuelPayload(raw json.RawMessage) (models.DuelPayload, string) {
 			},
 		},
 		OpponentSide: models.Side{
-			SideOffer: models.SideOffer{OutcomeID: trimmed(req.OpponentSide.OutcomeID), Odd: req.OpponentSide.Odd},
+			SideOffer: models.SideOffer{OutcomeID: outcome(req.OpponentSide.OutcomeID), Odd: req.OpponentSide.Odd},
 		},
 	}
 	// Figures are not taken from the request. They are derived from the stake and

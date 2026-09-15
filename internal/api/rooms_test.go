@@ -86,6 +86,48 @@ func TestCreateRoomDerivesFiguresRatherThanTrustingThem(t *testing.T) {
 	}
 }
 
+// The selection keys are structured objects, stored and returned as sent. The
+// lists inside them must come back as [] and never null, on a room READ BACK
+// FROM MONGO rather than the struct the create response echoed: the widget
+// resolves a room's own market by comparing JSON.stringify(marketParameters)
+// against an outcome id's values, and null equals nothing.
+func TestCreateRoomKeepsSelectionKeysStructured(t *testing.T) {
+	e := newEnv(t)
+	created := e.createRoom("alice", "evt-ucl")
+
+	res := e.do(http.MethodPost, "/rooms/"+created.ID+"/read", "alice", nil)
+	if res.status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", res.status, res.body)
+	}
+	var room models.Room
+	e.decode(res, http.StatusOK, &room)
+
+	if room.Payload.MarketID.EventID != "total_goals" || room.Payload.MarketID.MarketType != 5 ||
+		room.Payload.MarketID.ResultKind != 1 {
+		t.Errorf("marketId = %+v, want the market model as sent", room.Payload.MarketID)
+	}
+	if got := room.Payload.MarketItemID.MarketParameters; len(got) != 1 || got[0] != "2.5" {
+		t.Errorf("marketItemId.marketParameters = %v, want [2.5]", got)
+	}
+	if room.Payload.CreatorSide.OutcomeID.Type != 3 || room.Payload.OpponentSide.OutcomeID.Type != 4 {
+		t.Errorf("outcome types = %d/%d, want 3/4",
+			room.Payload.CreatorSide.OutcomeID.Type, room.Payload.OpponentSide.OutcomeID.Type)
+	}
+
+	for _, path := range []string{
+		`"creatorSide":{"outcomeId":{"type":3,"values":[]}`,
+		`"opponentSide":{"outcomeId":{"type":4,"values":[]}`,
+	} {
+		if !strings.Contains(string(res.body), path) {
+			t.Errorf("read body does not contain %s; an empty list serialised as null: %s", path, res.body)
+		}
+	}
+	if strings.Contains(string(res.body), `"values":null`) ||
+		strings.Contains(string(res.body), `"marketParameters":null`) {
+		t.Errorf("a selection key list serialised as null: %s", res.body)
+	}
+}
+
 func TestCreateRoomRefusals(t *testing.T) {
 	e := newEnv(t)
 	valid := func() map[string]any {
@@ -116,11 +158,18 @@ func TestCreateRoomRefusals(t *testing.T) {
 			b["payload"].(map[string]any)["opponentSide"].(map[string]any)["odd"] = 99
 		}, http.StatusBadRequest, "invalidRequest", "the guard cannot evaluate it, so it fails closed"},
 		{"same outcome both sides", func(b map[string]any) {
-			b["payload"].(map[string]any)["opponentSide"].(map[string]any)["outcomeId"] = "over"
+			// The same key as the creator's, sent as its own object: nil and empty
+			// values must compare equal, which is why == would not do here.
+			b["payload"].(map[string]any)["opponentSide"].(map[string]any)["outcomeId"] =
+				map[string]any{"type": 3, "values": []string{}}
 		}, http.StatusBadRequest, "invalidRequest", ""},
-		{"no market item", func(b map[string]any) {
-			b["payload"].(map[string]any)["marketItemId"] = ""
-		}, http.StatusBadRequest, "invalidRequest", "a market id alone cannot tell Over 2.5 from Over 3.5"},
+		{"no market event", func(b map[string]any) {
+			b["payload"].(map[string]any)["marketId"].(map[string]any)["eventId"] = ""
+		}, http.StatusBadRequest, "invalidRequest", "the market half of the selection triple is unusable"},
+		{"no opponent outcome", func(b map[string]any) {
+			// An all-zero outcome key is what an absent outcomeId unmarshals to.
+			delete(b["payload"].(map[string]any)["opponentSide"].(map[string]any), "outcomeId")
+		}, http.StatusBadRequest, "invalidRequest", "a side with no outcome is not a side"},
 		{"no creator placement", func(b map[string]any) {
 			delete(b["payload"].(map[string]any)["creatorSide"].(map[string]any), "placement")
 		}, http.StatusBadRequest, "invalidRequest", "the creator's bet always exists by now"},

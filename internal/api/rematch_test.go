@@ -26,10 +26,10 @@ func rematchBody(withBetRef bool) map[string]any {
 	body := map[string]any{
 		"participant": participant("Maksym K.", "MK"),
 		"payload": map[string]any{
-			"marketId":     "total_goals",
-			"marketItemId": "total_goals_2.5",
+			"marketId":     marketID("total_goals"),
+			"marketItemId": map[string]any{"marketParameters": []string{"2.5"}},
 			"creatorSide": map[string]any{
-				"outcomeId": "over",
+				"outcomeId": outcomeID(3),
 				"odd":       182,
 				"placement": map[string]any{
 					"stake":       json.RawMessage("10.00"),
@@ -37,7 +37,7 @@ func rematchBody(withBetRef bool) map[string]any {
 					"dataVersion": 3,
 				},
 			},
-			"opponentSide": map[string]any{"outcomeId": "under", "odd": 205},
+			"opponentSide": map[string]any{"outcomeId": outcomeID(4), "odd": 205},
 			"figures":      map[string]any{"payout": 0, "entry": 0, "pot": 0},
 		},
 	}

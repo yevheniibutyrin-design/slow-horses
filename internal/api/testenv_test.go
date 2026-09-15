@@ -233,6 +233,22 @@ func (e *env) decode(res response, wantStatus int, dst any) {
 // Request builders — the shipped client's shapes
 // ---------------------------------------------------------------------------
 
+// marketID and outcomeID build the selection keys in the object form the widget
+// sends: a MarketModelType and an OutcomeKeyType, not opaque strings. Values is
+// sent empty, which is what a parameterless market legitimately looks like.
+func marketID(eventID string) map[string]any {
+	return map[string]any{
+		"eventId":    eventID,
+		"marketType": 5,
+		"period":     0,
+		"resultKind": 1,
+	}
+}
+
+func outcomeID(typ int) map[string]any {
+	return map[string]any{"type": typ, "values": []string{}}
+}
+
 func participant(label, initials string) map[string]any {
 	return map[string]any{
 		"label":    label,
@@ -250,10 +266,10 @@ func createBody(eventID string, expiresAt int64, creatorOdd, opponentOdd int, st
 		"betRef":      map[string]any{"id": uniqueBetID(), "number": 12345},
 		"expiresAt":   expiresAt,
 		"payload": map[string]any{
-			"marketId":     "total_goals",
-			"marketItemId": "total_goals_2.5",
+			"marketId":     marketID("total_goals"),
+			"marketItemId": map[string]any{"marketParameters": []string{"2.5"}},
 			"creatorSide": map[string]any{
-				"outcomeId": "over",
+				"outcomeId": outcomeID(3),
 				"odd":       creatorOdd,
 				"placement": map[string]any{
 					"stake":       json.RawMessage(stake),
@@ -261,7 +277,7 @@ func createBody(eventID string, expiresAt int64, creatorOdd, opponentOdd int, st
 					"dataVersion": 7,
 				},
 			},
-			"opponentSide": map[string]any{"outcomeId": "under", "odd": opponentOdd},
+			"opponentSide": map[string]any{"outcomeId": outcomeID(4), "odd": opponentOdd},
 			"figures":      map[string]any{"payout": 0, "entry": 0, "pot": 0},
 		},
 	}

@@ -21,7 +21,7 @@ No framework, two dependencies (MongoDB driver + `google/uuid`).
 | `inviteCode` | string | The join secret, not derivable from `id` |
 | `inviteUrl` | string | The **host's** event page plus `?betRoomId=…&betRoomInvite=…` — not a URL on this service |
 | `createdAt`, `expiresAt` | int64 | Epoch **milliseconds**, never RFC3339 |
-| `payload` | object | The strategy's own data: the market triple, both sides, and the figures |
+| `payload` | object | The strategy's own data: the market triple, both sides, and the figures. The triple's three parts — `marketId`, `marketItemId` and each side's `outcomeId` — are **structured keys, not opaque strings**, and their lists serialise as `[]` rather than `null` |
 | `rematchOfRoomId` | string | Set on a rematch; the seat is restricted to the original opponent |
 
 Money crosses the wire as a two-decimal JSON number and is stored in minor units. Odds are the feed's
@@ -185,10 +185,11 @@ curl -s -X POST localhost:5000/rooms \
        "participant":{"label":"Maksym K.","initials":"MK","balances":{"eur":75.5}},
        "betRef":{"id":"bet-8812","number":12345},
        "expiresAt":'"$(( ($(date +%s) + 1800) * 1000 ))"',
-       "payload":{"marketId":"total_goals","marketItemId":"total_goals_2.5",
-         "creatorSide":{"outcomeId":"over","odd":182,
+       "payload":{"marketId":{"eventId":"evt-ucl-2026-09-15","marketType":5,"period":0,"resultKind":1},
+         "marketItemId":{"marketParameters":["2.5"]},
+         "creatorSide":{"outcomeId":{"type":3,"values":[]},"odd":182,
            "placement":{"stake":10.00,"lineItemId":"li-12","dataVersion":7}},
-         "opponentSide":{"outcomeId":"under","odd":205},
+         "opponentSide":{"outcomeId":{"type":4,"values":[]},"odd":205},
          "figures":{"payout":0,"entry":0,"pot":0}}}' | jq
 ```
 
