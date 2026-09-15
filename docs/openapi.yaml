@@ -1,10 +1,16 @@
 openapi: 3.0.3
 info:
-  title: Bet Room Service API
+  title: Bet Room and Votes Service API
   version: 1.0.0
   description: |
-    The bet room service: a strategy-agnostic room container plus the `duel`
-    strategy, serving the routes the `@sport-widgets/bet-room` widget calls.
+    Two surfaces served by one service.
+
+    The bet room: a strategy-agnostic room container plus the `duel` strategy,
+    serving the routes the `@sport-widgets/bet-room` widget calls.
+
+    The free vote (`/votes*`): the "Who wins?" poll behind
+    `@sport-widgets/poll-to-bet`. Prose and reasoning in `votes-api.md`; the vote
+    key's structure is a correctness constraint and its section 1 explains why.
 
     Prose, provenance and the reasoning behind every decision here:
     `bet-room-api.md` in this directory. Read it before changing anything — the
@@ -39,6 +45,7 @@ tags:
   - name: rooms
   - name: seats
   - name: limits
+  - name: votes
 
 security:
   - bearerAuth: []
@@ -450,6 +457,134 @@ paths:
           $ref: "#/components/responses/NotFound"
         "410":
           description: The event has already started.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+
+  /votes/counts:
+    post:
+      tags: [votes]
+      security: []
+      summary: Read vote counts for several markets at once
+      description: |
+        ONE request per widget mount, not one per card. The client type already
+        takes an array, but `loadVotes$` is invoked once per card and passes a
+        single-element array, so with three to five cards each response overwrites
+        `votesStore.votedToday` and the header counter races against itself.
+        Batching is a CLIENT change that must land with this endpoint.
+
+        A POST rather than a GET because three to five structured market keys do
+        not serialize sanely into a query string — the same reason
+        `/rooms/{roomId}/read` is a POST. Nothing is written.
+
+        Anonymous and cacheable. A signed-in reader is served exactly what a
+        signed-out one is, and NOTHING caller-specific may ride on this response —
+        see `votes-api.md` section 5.
+
+        A market nobody has voted in is not an error: every requested outcome is
+        answered, unknown ones with 0. Keys come back exactly as sent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VoteCountsRequest"
+      responses:
+        "200":
+          description: Counts for every requested outcome, in request order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VoteCountsResponse"
+        "400":
+          description: |
+            Malformed body, an unknown field, an empty `markets` array, a market key
+            missing an identifying number, or more entries than one request may ask
+            for (50 markets, 50 outcomes each).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+
+  /votes:
+    post:
+      tags: [votes]
+      security: []
+      summary: Cast a vote
+      description: |
+        One vote per market per identity, enforced by a unique index over
+        (market, voter) — the OUTCOME is deliberately not part of that key, or one
+        voter could vote for every outcome in the market.
+
+        Votes are FINAL: no re-vote, no change of pick, no withdrawal. A repeat of
+        the SAME pick answers 200 with the count unmoved, because a retried request
+        after a timeout must not read as a failure. A DIFFERENT outcome in the same
+        market is 409 `alreadyVoted`.
+
+        The fresh counts are returned so the client can stop optimistically
+        incrementing its own store.
+
+        Authentication is OPTIONAL and the free vote depends on that: a bearer
+        token makes the rule per account, and without one the caller is identified
+        by a device token THIS SERVICE issues. A client-minted id is never accepted
+        — see `votes-api.md` section 3.
+
+        NOTE the asymmetry, which is not what "optional" usually means: sending NO
+        credential is fine, sending a BAD one is a 401. An expired token treated as
+        anonymous would be recorded as a device, and the same human would vote
+        again as their account once the session refreshed — two votes, both
+        counted.
+
+        NOT CHECKED: that the market is still open. Rejecting a vote on a closed,
+        removed or settled market needs a sportsbook feed this service does not
+        have — `votes-api.md` section 7.1.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CastVoteRequest"
+      responses:
+        "200":
+          description: |
+            Recorded, or a retry of the same pick — the same answer either way.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CastVoteResponse"
+        "400":
+          description: Malformed body, an unknown field, or a market key missing an identifying number
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: |
+            A credential was sent and did not verify. Sending none is fine; sending
+            an unusable one is not — see the description above.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: |
+            This voter already voted in this market, for a DIFFERENT outcome. Its
+            own code `alreadyVoted`, so the client can reconcile local state rather
+            than swallowing it as a generic failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: |
+            The anonymous per-address daily limit. A device token is free to
+            discard and re-mint, so this is the actual ceiling on anonymous voting.
+            A signed-in player is unaffected.
           content:
             application/json:
               schema:
@@ -957,3 +1092,199 @@ components:
             The duel never PAYS the winner: the sportsbook's settlement of that
             participant's own bet is the payment.
           example: p-1
+
+    MarketKey:
+      type: object
+      required: [eventId, marketType, period, resultKind]
+      description: |
+        The widget's TMarketModel, MINUS `layout`.
+
+        `layout` is presentational and is accepted-and-ignored: keying on it would
+        fragment one market's votes across the layouts it renders in. It is
+        nonetheless accepted, because the decoder rejects unknown fields and a
+        client sending the whole TMarketModel would otherwise 400 the batch.
+
+        Structured fields rather than a serialized string ON PURPOSE. The client
+        indexes its own store by JSON.stringify of this object, whose output
+        depends on runtime property order; an opaque string on the wire would let a
+        reorder split one market's votes into two buckets with no error anywhere.
+        The server derives a canonical, injective form — see `votes-api.md` 1.2.
+      properties:
+        eventId:
+          type: string
+          example: evt-ucl-2026-09-15
+        marketType:
+          type: integer
+          example: 1
+        period:
+          type: integer
+          example: 0
+        resultKind:
+          type: integer
+          example: 2
+        subPeriod:
+          type: integer
+          nullable: true
+          description: |
+            Absent and null are the SAME market. `subPeriod: 0` is a DIFFERENT
+            market. Modelled as a pointer server-side so the three cannot collapse.
+          example: 1
+        layout:
+          type: string
+          description: Accepted and ignored. Never part of the vote key.
+          example: horizontal
+
+    OutcomeKey:
+      type: object
+      required: [type, values]
+      description: |
+        The widget's TOutcomeKey, scoped to its market: the same (type, values) in
+        two markets is two different vote buckets.
+
+        `values` is SORTED for the stored key, so ["1","2"] and ["2","1"] are one
+        bucket — and echoed back in the order it arrived, because the client looks
+        the count up by stringifying the object it sent.
+      properties:
+        type:
+          type: integer
+          example: 7
+        values:
+          type: array
+          items:
+            type: string
+          example: ["home"]
+
+    OutcomeCount:
+      type: object
+      required: [key, count]
+      properties:
+        key:
+          allOf:
+            - $ref: "#/components/schemas/OutcomeKey"
+            - description: |
+                The outcome EXACTLY as the caller sent it — same order, same
+                spelling. Normalising it here would miss every client-side lookup
+                and render zeros on a card that has votes.
+        count:
+          type: integer
+          format: int64
+          description: Lifetime votes for this outcome. An outcome nobody has voted for is 0.
+          example: 41
+
+    MarketCounts:
+      type: object
+      required: [market, outcomes]
+      properties:
+        market:
+          $ref: "#/components/schemas/MarketKey"
+        outcomes:
+          type: array
+          items:
+            $ref: "#/components/schemas/OutcomeCount"
+
+    VotedToday:
+      type: integer
+      format: int64
+      description: |
+        Every vote this service recorded since the current UTC day began,
+        SITE-WIDE — the header's "N voted today". A mount-time snapshot: a live
+        counter would need a push channel this service does not have.
+      example: 1243
+
+    VoteCountsRequest:
+      type: object
+      required: [markets]
+      properties:
+        markets:
+          type: array
+          minItems: 1
+          maxItems: 50
+          description: One entry per card on screen.
+          items:
+            type: object
+            required: [market, outcomes]
+            properties:
+              market:
+                $ref: "#/components/schemas/MarketKey"
+              outcomes:
+                type: array
+                minItems: 1
+                maxItems: 50
+                items:
+                  $ref: "#/components/schemas/OutcomeKey"
+
+    VoteCountsResponse:
+      type: object
+      required: [markets, votedToday]
+      description: |
+        Carries NOTHING caller-specific, and must not start to: this is the
+        cacheable anonymous path, and mixing caller identity into a response served
+        from a shared cache is a cohort leak this codebase has hit once already.
+      properties:
+        markets:
+          type: array
+          description: One entry per requested market, in request order.
+          items:
+            $ref: "#/components/schemas/MarketCounts"
+        votedToday:
+          $ref: "#/components/schemas/VotedToday"
+
+    CastVoteRequest:
+      type: object
+      required: [market, outcome]
+      description: |
+        Note what is NOT here: a `userId`. The client's own
+        crypto.randomUUID() is not accepted as an identity — it is free to mint, so
+        keying one-vote-per-market on it enforces nothing, and it can be pointed at
+        somebody else's identity to lock them out of a market.
+      properties:
+        market:
+          $ref: "#/components/schemas/MarketKey"
+        outcome:
+          allOf:
+            - $ref: "#/components/schemas/OutcomeKey"
+            - description: The outcome being picked.
+        outcomes:
+          type: array
+          maxItems: 50
+          description: |
+            Optional: the market's full outcome list, so the response can carry a
+            count for each and the card renders the whole split. Omitted, the
+            response answers for the picked outcome alone.
+          items:
+            $ref: "#/components/schemas/OutcomeKey"
+        deviceToken:
+          type: string
+          description: |
+            A token THIS SERVICE issued on a previous anonymous vote. Absent,
+            malformed or not signed by us, the caller is treated as a voter we have
+            not seen and a fresh token is minted — rather than refused, which would
+            strand every player whose token predates a secret rotation.
+
+            Ignored entirely when a bearer token is present: a signed-in player is
+            identified by their account.
+          example: 8Kq2vX1mB0nZ4tR7wYpLcg.H3nM9xQ2vB7kL0pS
+
+    CastVoteResponse:
+      type: object
+      required: [market, outcomes, votedToday]
+      properties:
+        market:
+          $ref: "#/components/schemas/MarketKey"
+        outcomes:
+          type: array
+          description: |
+            Fresh counts, so the client can stop optimistically incrementing its
+            own store.
+          items:
+            $ref: "#/components/schemas/OutcomeCount"
+        deviceToken:
+          type: string
+          description: |
+            Present ONLY when this request minted one. Store it and send it back on
+            the next vote; lose it, and the next vote is a new voter.
+
+            It appears here and NEVER on the counts response, which is the cacheable
+            anonymous path.
+        votedToday:
+          $ref: "#/components/schemas/VotedToday"

@@ -43,22 +43,29 @@ func main() {
 		}
 	}()
 
-	rooms := store.NewRooms(client.Database(cfg.MongoDB))
+	database := client.Database(cfg.MongoDB)
+	rooms := store.NewRooms(database)
+	votes := store.NewVotes(database)
 
 	indexCtx, cancelIndexes := context.WithTimeout(ctx, 30*time.Second)
 	err = rooms.EnsureIndexes(indexCtx)
+	if err == nil {
+		err = votes.EnsureIndexes(indexCtx)
+	}
 	cancelIndexes()
 	if err != nil {
-		// The unique index over a participant's bet reference is what makes a
-		// retried create idempotent, so starting without it would quietly allow
-		// two rooms for one bet.
-		log.Fatalf("could not create room indexes: %v", err)
+		// Both sets carry a unique index that IS the rule it enforces: one room
+		// per bet, and one vote per market per voter. Starting without them
+		// would not fail — it would quietly allow the thing they forbid.
+		log.Fatalf("could not create indexes: %v", err)
 	}
 
 	verifier := newVerifier(cfg)
+	devices := newDeviceTokens(cfg)
 
 	handlers := &api.Handlers{
 		Rooms:                rooms,
+		Votes:                votes,
 		OpenAPISpec:          docs.OpenAPI,
 		HostEventURLTemplate: cfg.HostEventURLTemplate,
 		InviteWindowMS:       cfg.InviteWindowMS,
@@ -66,6 +73,10 @@ func main() {
 		PerDuelMax:           cfg.DuelPerDuelMax,
 		DailyLimit:           cfg.DuelDailyLimit,
 		Currency:             cfg.DuelCurrency,
+
+		Devices:               devices,
+		AnonVotesPerIPPerDay:  cfg.AnonVotesPerIPPerDay,
+		TrustedClientIPHeader: cfg.TrustedClientIPHeader,
 	}
 
 	srv := &http.Server{
@@ -108,6 +119,28 @@ func newVerifier(cfg config.Config) auth.Verifier {
 		"This exists so local development and the smoke script work without a token issuer; " +
 		"set AUTH_JWT_SECRET before this service goes anywhere near production.")
 	return auth.InsecureVerifier{}
+}
+
+// newDeviceTokens builds the issuer for anonymous voter identities, and says so
+// when the secret behind them lasts only as long as this process.
+func newDeviceTokens(cfg config.Config) *auth.DeviceTokens {
+	secret := cfg.VoteDeviceSecret
+	if len(secret) == 0 {
+		// Reused rather than invented: a deployment that already configures one
+		// signing secret should not have to discover a second one exists.
+		secret = cfg.AuthJWTSecret
+	}
+	devices, err := auth.NewDeviceTokens(secret)
+	if err != nil {
+		log.Fatalf("could not initialise vote device tokens: %v", err)
+	}
+	if devices.Ephemeral {
+		log.Print("votes: WARNING — neither VOTE_DEVICE_SECRET nor AUTH_JWT_SECRET is set, so " +
+			"anonymous voter tokens are signed with a secret generated for this process. Every " +
+			"token stops verifying on restart and each anonymous player may vote again in every " +
+			"market they already voted in. Set VOTE_DEVICE_SECRET before this serves real traffic.")
+	}
+	return devices
 }
 
 // sweepExpiredRooms marks unfilled rooms past their expiry instant as expired

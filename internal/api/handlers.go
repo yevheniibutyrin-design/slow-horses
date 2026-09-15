@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yevheniibutyrin-design/slow-horses/internal/auth"
 	"github.com/yevheniibutyrin-design/slow-horses/internal/models"
 	"github.com/yevheniibutyrin-design/slow-horses/internal/store"
 )
@@ -20,6 +21,7 @@ const maxBodyBytes = 1 << 20 // 1 MiB
 // Handlers holds everything the HTTP handlers need.
 type Handlers struct {
 	Rooms       *store.Rooms
+	Votes       *store.Votes
 	OpenAPISpec []byte
 
 	// HostEventURLTemplate builds the invite link. See config.Config.
@@ -30,6 +32,17 @@ type Handlers struct {
 	PerDuelMax models.Amount
 	DailyLimit int
 	Currency   string
+
+	// Devices issues and verifies the identity an ANONYMOUS voter gets, and
+	// hashes the addresses the anonymous rate limit counts against.
+	Devices *auth.DeviceTokens
+	// AnonVotesPerIPPerDay caps anonymous votes from one address per UTC day.
+	// Zero or less disables the limit, which leaves anonymous voting unbounded.
+	AnonVotesPerIPPerDay int
+	// TrustedClientIPHeader names the forwarded-address header to believe when
+	// this service sits behind a proxy. Empty means believe none of them — see
+	// Handlers.clientIP.
+	TrustedClientIPHeader string
 
 	// Now is injectable so tests can drive expiry without sleeping.
 	Now func() time.Time

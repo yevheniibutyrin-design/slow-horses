@@ -53,6 +53,24 @@ type Config struct {
 	// real infrastructure. The default below is a placeholder, not a sized value.
 	SeatHoldTTLMS int64
 
+	// VoteDeviceSecret signs the device tokens anonymous voters are issued, and
+	// keys the hash of the addresses the anonymous rate limit counts against. It
+	// falls back to AuthJWTSecret, and then to a random per-process secret that
+	// does not survive a restart — startup says so when it comes to that.
+	VoteDeviceSecret []byte
+
+	// AnonVotesPerIPPerDay caps anonymous votes from one address per UTC day.
+	// A device token is free to discard and re-mint, so this — not the
+	// one-vote-per-device rule — is the actual ceiling on anonymous voting.
+	// Zero or less disables it.
+	AnonVotesPerIPPerDay int
+
+	// TrustedClientIPHeader names the forwarded-address header to believe. Empty
+	// (the default) believes none: a header any caller can set is a header any
+	// caller can vary to walk past a per-address limit. Behind a proxy this MUST
+	// be set, or every player collapses onto the proxy's own address.
+	TrustedClientIPHeader string
+
 	// Duel limits. The room service is the only component that knows how many
 	// duels a caller opened today, so the count comes from here; the two ceilings
 	// may be administered elsewhere and are configuration for now.
@@ -76,6 +94,10 @@ func Load() Config {
 
 		InviteWindowMS: envInt64("INVITE_WINDOW_MS", 30*60*1000),
 		SeatHoldTTLMS:  envInt64("SEAT_HOLD_TTL_MS", 90*1000),
+
+		VoteDeviceSecret:      []byte(os.Getenv("VOTE_DEVICE_SECRET")),
+		AnonVotesPerIPPerDay:  int(envInt64("VOTE_ANON_IP_DAILY_LIMIT", 50)),
+		TrustedClientIPHeader: os.Getenv("TRUSTED_CLIENT_IP_HEADER"),
 
 		DuelPerDuelMax: envAmount("DUEL_PER_DUEL_MAX", 50000), // 500.00
 		DuelDailyLimit: int(envInt64("DUEL_DAILY_LIMIT", 10)),

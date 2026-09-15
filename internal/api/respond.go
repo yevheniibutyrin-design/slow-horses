@@ -37,6 +37,11 @@ const (
 	codeInvalidRequest  = "invalidRequest"
 	codeUnknownStrategy = "unknownStrategy"
 	codeUnderround      = "underroundPrices"
+	// The vote routes. alreadyVoted must stay distinguishable from a generic
+	// failure: it is the one refusal a client reconciles local state against
+	// rather than logging.
+	codeAlreadyVoted    = "alreadyVoted"
+	codeVoteRateLimited = "voteRateLimited"
 	codeDailyLimit      = "dailyLimitReached"
 	codePerDuelMax      = "perDuelMaxExceeded"
 	codeInternal        = "internal"

@@ -40,6 +40,27 @@ call() {
   BODY="$(cat /tmp/sh-body)"
 }
 
+# callAnon is `call` with NO Authorization header at all. The vote routes accept
+# an anonymous caller and the write depends on it: the poll is free.
+callAnon() {
+  _method="$1"; _path="$2"; _body="${3:-}"
+  if [ -n "$_body" ]; then
+    STATUS="$(curl -sS -o /tmp/sh-body -w '%{http_code}' -X "$_method" "$BASE$_path" \
+      -H 'content-type: application/json' -d "$_body")"
+  else
+    STATUS="$(curl -sS -o /tmp/sh-body -w '%{http_code}' -X "$_method" "$BASE$_path")"
+  fi
+  BODY="$(cat /tmp/sh-body)"
+}
+
+# The counts in a vote response, space-separated and in response order — which is
+# request order, which is what the client's own lookup depends on.
+counts_of() {
+  printf '%s' "$1" | tr ',' '\n' \
+    | sed -n 's/.*"count"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    | tr '\n' ' ' | sed 's/ $//'
+}
+
 say "GET /ping (public)"
 STATUS="$(curl -sS -o /tmp/sh-body -w '%{http_code}' "$BASE/ping")"
 status "$STATUS"; cat /tmp/sh-body; echo
@@ -212,6 +233,72 @@ say "GET /rooms?eventId=... — the rematch is never publicly listed"
 call GET "/rooms?eventId=$EVENT&status=open" carol-smoke
 [ "$BODY" = "[]" ] || fail "a rematch room was listed publicly (got: $BODY)"
 echo "   -> []"
+
+# ---------------------------------------------------------------------------
+# The free vote. Separate surface, separate document: docs/votes-api.md
+# ---------------------------------------------------------------------------
+
+VOTE_MARKET="{\"eventId\":\"$EVENT\",\"marketType\":1,\"period\":0,\"resultKind\":2}"
+VOTE_OUTCOMES="[{\"type\":7,\"values\":[\"home\"]},{\"type\":7,\"values\":[\"away\"]}]"
+
+say "POST /votes/counts — a market nobody has voted in answers zeros, not a 404"
+callAnon POST "/votes/counts" "{\"markets\":[{\"market\":$VOTE_MARKET,\"outcomes\":$VOTE_OUTCOMES}]}"
+status "$STATUS"; echo "$BODY" | head -c 300; echo
+[ "$STATUS" = "200" ] || fail "expected 200"
+[ "$(counts_of "$BODY")" = "0 0" ] || fail "expected both counts to be 0, got: $(counts_of "$BODY")"
+
+say "POST /votes — alice picks home"
+call POST "/votes" "$ALICE" "{\"market\":$VOTE_MARKET,\"outcome\":{\"type\":7,\"values\":[\"home\"]},\"outcomes\":$VOTE_OUTCOMES}"
+status "$STATUS"; echo "$BODY" | head -c 300; echo
+[ "$STATUS" = "200" ] || fail "expected 200"
+[ "$(counts_of "$BODY")" = "1 0" ] || fail "the write must return fresh counts, got: $(counts_of "$BODY")"
+
+say "POST /votes — the same pick again is a RETRY, not a second vote"
+call POST "/votes" "$ALICE" "{\"market\":$VOTE_MARKET,\"outcome\":{\"type\":7,\"values\":[\"home\"]},\"outcomes\":$VOTE_OUTCOMES}"
+status "$STATUS"
+[ "$STATUS" = "200" ] || fail "a retried vote must not read as a failure"
+[ "$(counts_of "$BODY")" = "1 0" ] || fail "a retry moved the count: $(counts_of "$BODY")"
+
+say "POST /votes — alice cannot change her pick -> 409"
+call POST "/votes" "$ALICE" "{\"market\":$VOTE_MARKET,\"outcome\":{\"type\":7,\"values\":[\"away\"]}}"
+status "$STATUS"; echo "$BODY"
+[ "$STATUS" = "409" ] || fail "votes are final; expected 409"
+case "$BODY" in
+  *'"code":"alreadyVoted"'*) echo "   -> alreadyVoted, distinguishable from a generic failure" ;;
+  *) fail "a duplicate vote must carry its own code" ;;
+esac
+
+say "POST /votes — an anonymous player votes and is issued a device token"
+callAnon POST "/votes" "{\"market\":$VOTE_MARKET,\"outcome\":{\"type\":7,\"values\":[\"away\"]},\"outcomes\":$VOTE_OUTCOMES}"
+status "$STATUS"; echo "$BODY" | head -c 300; echo
+[ "$STATUS" = "200" ] || fail "the free vote must not require signing in"
+DEVICE="$(field "$BODY" deviceToken)"
+[ -n "$DEVICE" ] || fail "no device token was minted for an anonymous voter"
+[ "$(counts_of "$BODY")" = "1 1" ] || fail "expected 1 1, got: $(counts_of "$BODY")"
+
+say "POST /votes — presenting that token back, the pick cannot be changed -> 409"
+callAnon POST "/votes" "{\"market\":$VOTE_MARKET,\"outcome\":{\"type\":7,\"values\":[\"home\"]},\"deviceToken\":\"$DEVICE\"}"
+status "$STATUS"
+[ "$STATUS" = "409" ] || fail "the device token did not hold the anonymous voter to one vote"
+
+say "POST /votes/counts — layout is ignored, and the batch answers every market"
+callAnon POST "/votes/counts" "$(cat <<JSON
+{"markets":[
+  {"market":{"eventId":"$EVENT","marketType":1,"period":0,"resultKind":2,"layout":"vertical"},
+   "outcomes":$VOTE_OUTCOMES},
+  {"market":{"eventId":"$EVENT-other","marketType":1,"period":0,"resultKind":2},
+   "outcomes":[{"type":7,"values":["home"]}]}
+]}
+JSON
+)"
+status "$STATUS"; echo "$BODY" | head -c 400; echo
+[ "$STATUS" = "200" ] || fail "expected 200"
+[ "$(counts_of "$BODY")" = "1 1 0" ] || fail "expected 1 1 0 across both markets, got: $(counts_of "$BODY")"
+
+say "POST /votes — a market key missing an identifying number -> 400"
+callAnon POST "/votes" "{\"market\":{\"eventId\":\"$EVENT\",\"period\":0,\"resultKind\":2},\"outcome\":{\"type\":7,\"values\":[\"home\"]}}"
+status "$STATUS"; echo "$BODY"
+[ "$STATUS" = "400" ] || fail "a missing marketType must not vote silently in market type 0"
 
 say "GET /openapi.yaml (public)"
 STATUS="$(curl -sS -o /tmp/sh-body -w '%{http_code}' "$BASE/openapi.yaml")"

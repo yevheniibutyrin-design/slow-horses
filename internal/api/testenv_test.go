@@ -38,6 +38,9 @@ const (
 	testSeatHoldTTLMS  = 90 * 1000
 	testPerDuelMax     = models.Amount(50000) // 500.00
 	testDailyLimit     = 10
+	// Low on purpose, so the anonymous rate limit is reachable in a test without
+	// casting fifty votes.
+	testAnonVotesPerIPPerDay = 3
 )
 
 // env is one isolated server: its own database, its own clock.
@@ -46,6 +49,7 @@ type env struct {
 	server *httptest.Server
 	now    *atomic.Int64 // epoch ms, so expiry is testable without sleeping
 	rooms  *store.Rooms
+	votes  *store.Votes
 }
 
 func mongoURI() string {
@@ -98,7 +102,15 @@ func run(m *testing.M) int {
 	// package and may run them at the same time.
 	db := client.Database(fmt.Sprintf("slowhorses_api_test_%d", time.Now().UnixNano()))
 	if err := store.NewRooms(db).EnsureIndexes(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "ensure indexes: %v\n", err)
+		fmt.Fprintf(os.Stderr, "ensure room indexes: %v\n", err)
+		_ = client.Disconnect(context.Background())
+		return 1
+	}
+	// The votes indexes too, and for the same reason the rooms ones matter here:
+	// the unique index IS the one-vote-per-market rule, so a test binary without
+	// it would see the duplicate-vote tests pass for the wrong reason.
+	if err := store.NewVotes(db).EnsureIndexes(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "ensure vote indexes: %v\n", err)
 		_ = client.Disconnect(context.Background())
 		return 1
 	}
@@ -124,6 +136,17 @@ func uniqueBetID() string {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
+	// InsecureVerifier means the token IS the subject, so "alice" and "bob" in
+	// these tests are two different callers.
+	return newEnvWithVerifier(t, auth.InsecureVerifier{})
+}
+
+// newEnvWithVerifier is newEnv with a real credential check, for the one
+// distinction InsecureVerifier cannot express: it fails only on an empty token,
+// which BearerToken already rejects, so "a token that does not verify" is
+// unreachable under it — in tests AND in local development.
+func newEnvWithVerifier(t *testing.T, verifier auth.Verifier) *env {
+	t.Helper()
 
 	if testDB == nil {
 		t.Skip(mongoSkipMsg)
@@ -138,13 +161,25 @@ func newEnv(t *testing.T) *env {
 	if _, err := testDB.Collection(store.CollectionName).DeleteMany(ctx, bson.D{}); err != nil {
 		t.Fatalf("empty the rooms collection: %v", err)
 	}
+	if _, err := testDB.Collection(store.VotesCollectionName).DeleteMany(ctx, bson.D{}); err != nil {
+		t.Fatalf("empty the votes collection: %v", err)
+	}
 	rooms := store.NewRooms(testDB)
+	votes := store.NewVotes(testDB)
+
+	// A fixed secret, so a token minted in one request still verifies in the
+	// next one of the same test.
+	devices, err := auth.NewDeviceTokens([]byte("test-device-secret"))
+	if err != nil {
+		t.Fatalf("device tokens: %v", err)
+	}
 
 	clock := &atomic.Int64{}
 	clock.Store(time.Now().UnixMilli())
 
 	handlers := &api.Handlers{
 		Rooms:                rooms,
+		Votes:                votes,
 		OpenAPISpec:          []byte("openapi: 3.0.3\n"),
 		HostEventURLTemplate: "https://sportsbook.example/event/{eventId}",
 		InviteWindowMS:       testInviteWindowMS,
@@ -152,16 +187,21 @@ func newEnv(t *testing.T) *env {
 		PerDuelMax:           testPerDuelMax,
 		DailyLimit:           testDailyLimit,
 		Currency:             "EUR",
-		Now:                  func() time.Time { return time.UnixMilli(clock.Load()) },
+
+		Devices:              devices,
+		AnonVotesPerIPPerDay: testAnonVotesPerIPPerDay,
+		// Left empty deliberately: the tests exercise the default, which believes
+		// no forwarded header and counts against the real connection address.
+		TrustedClientIPHeader: "",
+
+		Now: func() time.Time { return time.UnixMilli(clock.Load()) },
 	}
 
-	// InsecureVerifier means the token IS the subject, so "alice" and "bob" below
-	// are two different callers. Token verification has its own unit tests.
-	server := httptest.NewServer(api.NewRouter(handlers, auth.InsecureVerifier{}, []string{"https://allowed.example"}))
+	server := httptest.NewServer(api.NewRouter(handlers, verifier, []string{"https://allowed.example"}))
 
 	t.Cleanup(server.Close)
 
-	return &env{t: t, server: server, now: clock, rooms: rooms}
+	return &env{t: t, server: server, now: clock, rooms: rooms, votes: votes}
 }
 
 // advance moves the server's clock forward by that many MILLISECONDS, so expiry
