@@ -1,9 +1,16 @@
 # Slow Horses — Go + MongoDB API boilerplate
 
-A Go + MongoDB service, running entirely in Docker, serving the **bet room** API the
-`@sport-widgets/bet-room` widget calls. A bet room turns one two-way market into a head-to-head
-contest between two players; the room coordinates them and **never holds, moves or settles money** —
-both sides are ordinary sportsbook single bets and the room stores a reference to each.
+A Go + MongoDB service, running entirely in Docker, serving two widget surfaces.
+
+**Bet rooms**, for `@sport-widgets/bet-room`. A bet room turns one two-way market into a
+head-to-head contest between two players; the room coordinates them and **never holds, moves or
+settles money** — both sides are ordinary sportsbook single bets and the room stores a reference to
+each.
+
+**Votes**, for `@sport-widgets/poll-to-bet`. The free "Who wins?" poll: a player picks an outcome
+for nothing and sees the crowd split beside the odds-implied one. Counts and the vote write are the
+entire surface — events, odds and market state already reach the widget from the feed. The contract
+is [`docs/votes-api.md`](docs/votes-api.md).
 
 No framework, two dependencies (MongoDB driver + `google/uuid`).
 
@@ -28,6 +35,10 @@ Money crosses the wire as a two-decimal JSON number and is stored in minor units
 raw integers — `182` means `1.82`.
 
 ## Read this before changing anything
+
+**[`docs/votes-api.md`](docs/votes-api.md)** is the same thing for the votes surface: why the vote
+key is structured fields rather than a serialized string, why a client-minted `userId` is not an
+identity, and what the counts response must never start carrying.
 
 **[`docs/bet-room-api.md`](docs/bet-room-api.md)** is the contract and the reasoning behind it:
 every route, the wire-format facts that break the widget *silently* if you get them wrong, what the
@@ -128,9 +139,11 @@ Inspect the data directly with `make mongosh` (`docker compose exec mongo mongos
 
 ## Endpoints
 
-Base URL `http://localhost:5000`. **Every route below needs `Authorization: Bearer <token>`** except
-`GET /ping`, `GET /openapi.yaml`, and the two read routes — `GET /rooms` and
+Base URL `http://localhost:5000`. **Every room route below needs `Authorization: Bearer <token>`**
+except `GET /ping`, `GET /openapi.yaml`, and the two read routes — `GET /rooms` and
 `POST /rooms/{roomId}/read` — where a token is optional so a room is observable without signing in.
+**Both vote routes take an optional token too**, and for the vote write that is the feature: the
+poll is free and a signed-out player must be able to use it.
 Sending one there still matters: only a participant or a caller who presents the correct invite code
 gets `inviteCode` and `inviteUrl` back. Every route that writes still requires a token, because an
 anonymous caller has no identity to attribute a seat to. With `AUTH_JWT_SECRET` unset the token
@@ -147,6 +160,8 @@ itself is taken as the caller's identity, so `Bearer alice` is a user called ali
 | `DELETE /rooms/{roomId}/seat/{holdId}` | Release a held seat rather than waiting out its TTL |
 | `POST /rooms/{roomId}/seat/{holdId}/confirm` | Turn the hold into a participant, with the bet placed |
 | `POST /rooms/{roomId}/rematch` | Open a rematch, joinable only by the original opponent |
+| `POST /votes/counts` | Vote counts for every card on screen, in one request |
+| `POST /votes` | Cast a free vote, and get the market's fresh counts back |
 
 Full request and response shapes: [`docs/bet-room-api.md`](docs/bet-room-api.md) §2.
 
@@ -249,6 +264,37 @@ A new duel restricted to the other participant of the one it came from. The serv
 opponent itself — the payload carries no cross-room identity for it to be told — so the invite code
 alone does not get a stranger in.
 
+### `POST /votes/counts` and `POST /votes`
+
+The free vote. Both are POSTs because a structured market key does not serialize sanely into a query
+string.
+
+```bash
+# counts for every card on screen — ONE request per mount, not one per card
+curl -s -X POST localhost:5000/votes/counts \
+  -H 'content-type: application/json' \
+  -d '{"markets":[{"market":{"eventId":"evt-ucl-2026-09-15","marketType":1,"period":0,"resultKind":2},
+                   "outcomes":[{"type":7,"values":["home"]},{"type":7,"values":["away"]}]}]}' | jq
+
+# cast one — no token needed; the response carries a device token to send back next time
+curl -s -X POST localhost:5000/votes \
+  -H 'content-type: application/json' \
+  -d '{"market":{"eventId":"evt-ucl-2026-09-15","marketType":1,"period":0,"resultKind":2},
+       "outcome":{"type":7,"values":["home"]},
+       "outcomes":[{"type":7,"values":["home"]},{"type":7,"values":["away"]}]}' | jq
+```
+
+| Status | Meaning |
+|---|---|
+| `200` | Recorded — or a retry of the same pick, which answers the same |
+| `400` | Malformed body, an unknown field, or a market key missing an identifying number |
+| `409` | Already voted in this market, for a **different** outcome. Votes are final |
+| `429` | The anonymous per-address daily limit |
+
+Three things about the key that are easy to get wrong, all covered in `docs/votes-api.md` §1:
+`layout` is accepted and **ignored**; `values` order does not matter for the bucket but is **echoed
+back as sent**; and `subPeriod` absent is the same market as `null` but **not** the same as `0`.
+
 ### `GET /ping`, `GET /openapi.yaml`
 
 Liveness and the served spec. The only two routes that need no credential.
@@ -257,7 +303,9 @@ Liveness and the served spec. The only two routes that need no credential.
 
 `./scripts/smoke.sh` (or `make smoke`) drives a full duel against a running stack: create, list,
 reserve, release, confirm, rematch, plus the `401`/`403`/`409` negative cases, failing loudly on the
-first unexpected status. The Postman collection does the same with assertions on the wire format.
+first unexpected status. It then drives the free vote on a fresh market: zeros on an unvoted market,
+a vote, the same vote retried, a changed pick refused, an anonymous vote and its device token, and
+`layout` being ignored. The Postman collection does the same with assertions on the wire format.
 
 ## Authentication
 
@@ -299,11 +347,17 @@ seat and confirms it, alice offers a rematch only bob can take — saving what e
 environment. A pre-request script on the first request mints fresh bet references per run, because
 one bet can belong to at most one room.
 
+The `V1`–`V8` requests at the end cover the free vote, on a market id minted per run for the same
+reason: one vote per market per identity is permanent, so a re-run against the same market would be
+a `409` everywhere.
+
 `aliceToken`, `bobToken` and `carolToken` are three different callers: in the server's insecure mode
 the token *is* the identity. Set `AUTH_JWT_SECRET` and they need to be real HS256 tokens.
 
 Beyond the status codes, the tests assert the three wire-format facts that break the widget silently:
 success bodies are not enveloped, error bodies use `message`, and timestamps are epoch milliseconds.
+The vote requests add the two that break `poll-to-bet` the same way: a key comes back exactly as it
+was sent, and the counts response carries nothing about the caller.
 
 With `newman` installed (`npx newman` works too):
 
@@ -327,6 +381,9 @@ newman run postman/slow-horses.postman_collection.json -e postman/slow-horses.po
 | `DUEL_PER_DUEL_MAX` | `500.00` | Maximum stake per duel |
 | `DUEL_DAILY_LIMIT` | `10` | Duels one caller may open per UTC day |
 | `DUEL_CURRENCY` | `EUR` | Reported by `GET /rooms/limits` |
+| `VOTE_DEVICE_SECRET` | *(unset)* | Signs anonymous voters' device tokens. Falls back to `AUTH_JWT_SECRET`, then to a per-process secret that does not survive a restart — the server warns when it comes to that |
+| `VOTE_ANON_IP_DAILY_LIMIT` | `50` | Anonymous votes per address per UTC day. `0` disables it. This, not the per-device rule, is the real ceiling on anonymous voting |
+| `TRUSTED_CLIENT_IP_HEADER` | *(unset)* | Forwarded-address header to believe. Unset believes none. **Behind a proxy this must be set**, or every player collapses onto the proxy's address |
 
 `.env.example` documents these. Compose interpolates them, so editing `.env` and re-running
 `docker compose up -d` is enough — and the `Makefile` reads the same file, so `make smoke` targets the
@@ -341,13 +398,17 @@ assume it) — change that in `docker-compose.yml`, not `.env`.
 cmd/api/main.go        # wiring: config -> mongo -> router -> server + graceful shutdown
 internal/config/       # environment variables with defaults
 internal/db/           # Mongo connect with a bounded ping retry
-internal/models/       # Room, Participant, the duel payload, and Amount (money in minor units)
+internal/models/       # Room, Participant, the duel payload, Amount (money in minor units),
+                       #   and the vote keys with their canonical form
 internal/duel/         # the entry arithmetic and the underround guard — pure, integer-only
 internal/auth/         # bearer verification: HS256, plus the insecure development fallback
-internal/store/        # the rooms queries, including the atomic seat claim; keeps bson out of the handlers
+                       #   (device.go: the identity an ANONYMOUS voter is issued)
+internal/store/        # the rooms and votes queries, including the atomic seat claim and the
+                       #   unique index that IS the one-vote-per-market rule
                        #   (its own test covers the expiry sweep, which no request path reaches)
 internal/api/          # router, handlers, middleware, JSON helpers, and the integration tests
 docs/bet-room-api.md   # THE CONTRACT: every route, every wire-format constraint, and why
+docs/votes-api.md      # the same for votes: the vote key, identity, caching and the limits
 docs/openapi.yaml      # hand-written spec, embedded and served at /openapi.yaml
 docker/mongo-init.js   # first-boot seed for the rooms collection
 postman/               # collection + environment
@@ -404,10 +465,10 @@ that should be refused never writes.
 
 Run end to end on macOS (Apple silicon) with Colima as the Docker runtime: all three containers
 healthy, three seeded duels in `slowhorses.rooms`, `go test ./...` green against a real Mongo
-(including twelve simultaneous claims on one seat producing exactly one hold) over ten consecutive
-runs, `make test` green in a container, `scripts/smoke.sh` green across
-`200 / 201 / 204 / 401 / 403 / 409`, and the Postman collection green at 18 requests and
-32 assertions. The API was reached on host port 5001 because AirPlay Receiver held 5000 (see *Known
+(including twelve simultaneous claims on one seat producing exactly one hold, and twelve
+simultaneous votes from one caller producing exactly one vote) over ten consecutive runs, `make test`
+green in a container, `scripts/smoke.sh` green across `200 / 201 / 204 / 400 / 401 / 403 / 409`, and
+the Postman collection green at 26 requests and 58 assertions. The API was reached on host port 5001 because AirPlay Receiver held 5000 (see *Known
 gotchas*).
 
 ## Not included yet
@@ -418,6 +479,17 @@ gotchas*).
 - **Settlement.** Nothing writes `status: settled | void` or `payload.winnerParticipantId`, so a
   filled duel stays filled forever. That is a worker resolving each participant's `betRef` against
   the sportsbook's settlement.
+- **Rejecting a vote on a closed, removed or settled market.** Same missing feed as above: the
+  service cannot tell whether a market is still open, so a card that closes between render and click
+  still records a vote. `docs/votes-api.md` §7.1.
+- **A read of the player's own picks.** An open product decision, not an omission — it changes the
+  rule from per-device to per-account and needs a merge rule for a vote cast while logged out.
+  `docs/votes-api.md` §7.2.
 - **Pagination** on the open-rooms list, and **CI**.
 
-`docs/bet-room-api.md` §5.5, §5.6 and §9 size each of these and say what they block.
+`docs/bet-room-api.md` §5.5, §5.6 and §9 size the room ones and say what they block;
+`docs/votes-api.md` §7 does the same for the vote ones.
+
+One more, and it is **not in this repository**: `loadVotes$` in the widget must be called once per
+mount with every card's market key, not once per card, or the header's `votedToday` races against
+itself. That change lives in `sport-space` and has to land with these endpoints.

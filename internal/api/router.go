@@ -37,6 +37,12 @@ func NewRouter(h *Handlers, verifier auth.Verifier, allowedOrigins []string) htt
 	// 6. Open a rematch, restricted to the opponent of the duel it came from.
 	mux.HandleFunc("POST /rooms/{roomId}/rematch", h.rematch)
 
+	// The free vote. Counts are read for every card on screen in one request;
+	// a vote is cast one at a time. Both are POSTs because a structured market
+	// key does not serialize sanely into a query string.
+	mux.HandleFunc("POST /votes/counts", h.voteCounts)
+	mux.HandleFunc("POST /votes", h.castVote)
+
 	// Outermost first: recover, then log, then CORS (which answers preflights),
 	// then authentication — so a rejected credential is still logged, and a
 	// preflight is answered without needing one.

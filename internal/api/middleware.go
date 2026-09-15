@@ -126,12 +126,42 @@ var publicPaths = []string{"/ping", "/openapi.yaml"}
 // still needs a real token. models.ParticipantBySubject already refuses to match
 // on "", which stops an empty subject from ever reading as a participant.
 //
+// The one write that tolerates an anonymous caller is on its own list below, for
+// a reason this one does not cover.
+//
 // These are ServeMux patterns compared against the pattern the mux itself
 // resolved, not hand-matched path shapes, so they cannot drift out of step with
 // the routes registered in NewRouter.
 var optionalAuthPatterns = []string{
 	"GET /rooms",
 	"POST /rooms/{roomId}/read",
+	// The vote counts are an anonymous aggregate: a signed-in reader is served
+	// exactly what a signed-out one is.
+	"POST /votes/counts",
+}
+
+// anonymousWritePatterns are routes where NO credential is fine but a BAD one is
+// not. The distinction does not exist on the read routes above and it matters
+// here.
+//
+// POST /votes is the only entry, and it breaks the "reads only" rule stated
+// above for a reason that rule does not cover. That rule holds because every
+// anonymous caller shares the empty subject, so a write keyed on the subject
+// could not tell them apart. A vote is not keyed on the subject: an anonymous
+// voter is identified by a device token THIS SERVICE issues, so two of them are
+// distinguishable, and neither can reach anything belonging to the other — a
+// vote confers no access to anything, unlike a seat hold. Requiring a token
+// would not be a stricter version of the same service; it would delete the free
+// vote for signed-out players, which is the feature.
+//
+// But an EXPIRED or otherwise unusable token must be a 401 rather than falling
+// through to an anonymous vote. Treated as anonymous, the caller is recorded as
+// "anon:<device>", and once their session refreshes they vote again in the same
+// market as "user:<sub>" — two votes from one human, both counted, because the
+// unique index is per voter id and those are two different ones. One vote per
+// market per account has to mean that even when a credential has just lapsed.
+var anonymousWritePatterns = []string{
+	"POST /votes",
 }
 
 // authenticating resolves the caller from the bearer token and puts the subject
@@ -152,13 +182,18 @@ func authenticating(verifier auth.Verifier, mux *http.ServeMux) func(http.Handle
 			// 404 handler with an empty pattern, which is on no list and so still
 			// demands a credential — the default stays closed.
 			_, pattern := mux.Handler(r)
-			optional := slices.Contains(optionalAuthPatterns, pattern)
+			// An absent credential is tolerated on both lists; an unusable one
+			// only on the reads. See anonymousWritePatterns for why the two
+			// differ.
+			absenceOK := slices.Contains(optionalAuthPatterns, pattern) ||
+				slices.Contains(anonymousWritePatterns, pattern)
+			invalidOK := slices.Contains(optionalAuthPatterns, pattern)
 
 			// The token travels only in this header. Never read it from a query
 			// string or a body: both are logged and cached where a header is not.
 			token, ok := auth.BearerToken(r.Header.Get("Authorization"))
 			if !ok {
-				if optional {
+				if absenceOK {
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -167,7 +202,7 @@ func authenticating(verifier auth.Verifier, mux *http.ServeMux) func(http.Handle
 			}
 			subject, err := verifier.Subject(token)
 			if err != nil {
-				if optional {
+				if invalidOK {
 					next.ServeHTTP(w, r)
 					return
 				}
