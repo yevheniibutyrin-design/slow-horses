@@ -259,6 +259,21 @@ Liveness and the served spec. The only two routes that need no credential.
 reserve, release, confirm, rematch, plus the `401`/`403`/`409` negative cases, failing loudly on the
 first unexpected status. The Postman collection does the same with assertions on the wire format.
 
+### Seed data
+
+`make seed` adds ten open duels across three events and five creators, through `POST /rooms` rather
+than by inserting documents — so the figures are derived by `internal/duel`, the invite codes come
+from `crypto/rand`, and the underround, per-duel-max and daily-limit guards all had to pass. A
+hand-written document can drift from what the service would produce; a seeded one cannot.
+
+`make seed-fresh` empties the rooms collection first. Plain `make seed` is additive, so running it
+twice leaves twenty rooms.
+
+Two details worth knowing. The rooms expire 25 minutes after seeding, because a room's expiry is
+clamped to the 30-minute invite window — re-run to refresh. And the creators are five distinct
+subjects on purpose: a caller's own rooms are excluded from their own open-rooms list, so seeding
+everything as one person would make `GET /rooms` look empty to exactly the person testing it.
+
 ## Authentication
 
 The room contract carries **no user identifier in any payload** — not an id, not an email, not an
@@ -352,6 +367,7 @@ docs/openapi.yaml      # hand-written spec, embedded and served at /openapi.yaml
 docker/mongo-init.js   # first-boot seed for the rooms collection
 postman/               # collection + environment
 scripts/smoke.sh       # end-to-end curl check: a full duel
+scripts/seed.sh        # fills the rooms collection with ten open duels
 ```
 
 ## Adding an endpoint
