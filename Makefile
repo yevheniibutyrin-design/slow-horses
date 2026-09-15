@@ -10,7 +10,7 @@ BASE_URL ?= http://localhost:$(API_HOST_PORT)
 # Reused module cache so containerised go commands stay fast.
 GO_RUN = docker run --rm -v "$(PWD)":/src -w /src -v slow-horses-gomod:/go/pkg/mod $(GO_IMAGE)
 
-.PHONY: help up down restart logs ps watch reseed tidy vet build test smoke mongosh
+.PHONY: help up down restart logs ps watch reseed tidy vet build test smoke seed seed-fresh mongosh
 
 help: ## Show available targets
 	@grep -hE '^[a-z-]+:.*##' $(firstword $(MAKEFILE_LIST)) | sed 's/:.*##/\t/' | awk -F'\t' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -60,3 +60,12 @@ mongosh: ## Open a mongo shell on the application database
 
 smoke: ## Drive a full duel against a running stack
 	@./scripts/smoke.sh $(BASE_URL)
+
+seed: ## Add ten open duels via the API (additive)
+	@./scripts/seed.sh $(BASE_URL)
+
+seed-fresh: ## Empty the rooms collection, then seed ten open duels
+	@echo "Emptying the rooms collection in $(MONGO_DB)..."
+	@docker compose exec -T mongo mongosh $(MONGO_DB) --quiet \
+	  --eval 'print("  removed " + db.rooms.deleteMany({}).deletedCount + " rooms")'
+	@./scripts/seed.sh $(BASE_URL)
