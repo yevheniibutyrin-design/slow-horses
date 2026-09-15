@@ -64,10 +64,11 @@ call POST /rooms "$ALICE" "$(cat <<JSON
  "participant":{"label":"Maksym K.","initials":"MK","balances":{"eur":75.5}},
  "betRef":{"id":"bet-smoke-$(date +%s)-a","number":12345},
  "expiresAt":$(( ($(date +%s) + 1800) * 1000 )),
- "payload":{"marketId":"total_goals","marketItemId":"total_goals_2.5",
-   "creatorSide":{"outcomeId":"over","odd":182,
+ "payload":{"marketId":{"eventId":"$EVENT","marketType":5,"period":0,"resultKind":1},
+   "marketItemId":{"marketParameters":["2.5"]},
+   "creatorSide":{"outcomeId":{"type":3,"values":[]},"odd":182,
      "placement":{"stake":10.00,"lineItemId":"li-12","dataVersion":7}},
-   "opponentSide":{"outcomeId":"under","odd":205},
+   "opponentSide":{"outcomeId":{"type":4,"values":[]},"odd":205},
    "figures":{"payout":0,"entry":0,"pot":0}}}
 JSON
 )"
@@ -186,10 +187,11 @@ say "POST /rooms/{id}/rematch — alice re-offers to bob"
 call POST "/rooms/$ROOM/rematch" "$ALICE" "$(cat <<JSON
 {"participant":{"label":"Maksym K.","initials":"MK","balances":{"eur":65}},
  "betRef":{"id":"bet-smoke-$(date +%s)-c","number":12400},
- "payload":{"marketId":"total_goals","marketItemId":"total_goals_2.5",
-   "creatorSide":{"outcomeId":"over","odd":182,
+ "payload":{"marketId":{"eventId":"$EVENT","marketType":5,"period":0,"resultKind":1},
+   "marketItemId":{"marketParameters":["2.5"]},
+   "creatorSide":{"outcomeId":{"type":3,"values":[]},"odd":182,
      "placement":{"stake":10.00,"lineItemId":"li-77","dataVersion":3}},
-   "opponentSide":{"outcomeId":"under","odd":205},
+   "opponentSide":{"outcomeId":{"type":4,"values":[]},"odd":205},
    "figures":{"payout":0,"entry":0,"pot":0}}}
 JSON
 )"

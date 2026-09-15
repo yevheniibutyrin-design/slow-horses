@@ -94,7 +94,30 @@ Use `int64` milliseconds in every DTO. Store `time.Time` internally if you like;
 `[types]` also flags the direction of the one conversion the widget does: `EventType.startTime` is
 epoch *seconds* and is multiplied by 1000 before it reaches this contract.
 
-### 1.4 The status-code map is exact `[client-utils]`
+### 1.4 The three selection keys are objects, not strings `[types]`
+
+`marketId`, `marketItemId` and each side's `outcomeId` are **structured keys**. The widget composes
+them from `MarketModelType`, `MarketItemKeyType` and `OutcomeKeyType` (`libs/types/src/markets.ts`)
+and reads them back as objects; transcribing any of them as an opaque `string` 400s every room the
+widget tries to create.
+
+```jsonc
+"marketId":     { "eventId": "evt-1", "marketType": 5, "period": 0, "resultKind": 1 },
+"marketItemId": { "marketParameters": ["2.5"] },
+"outcomeId":    { "type": 3, "values": [] }
+```
+
+`subPeriod` on `marketId` is **omitted** rather than zeroed when absent: the widget distinguishes "no
+sub-period" from "sub-period 0" when it matches a market model against a placed bet.
+
+**`marketParameters` and `values` must serialise as `[]`, never `null`.** Both are legitimately empty
+— a parameterless market such as 1X2 has no parameters at all — and the widget's `findMarketItem`
+compares them with `JSON.stringify(item.key.marketParameters) === JSON.stringify(outcomeId.values)`,
+where `null` equals nothing. A Go nil slice marshals to `null`, so it is normalised on write **and**
+on every read (`roomView`); a room stored with `null` silently fails to resolve its own market rather
+than erroring.
+
+### 1.5 The status-code map is exact `[client-utils]`
 
 `mapStatusToErrorKind` is a closed switch. **Any status not in it collapses to `unavailable`**, which
 renders as "duels are temporarily unavailable" `[widget]` — the wrong sentence for a business refusal.
@@ -120,7 +143,7 @@ Every row here is covered by a test in `internal/api`, except the "event has sta
 that has no code path at all until §5.5 is resolved, and is listed so the status is not quietly
 reused for something else.
 
-### 1.5 Auth on every route `[lifecycle]` `[design]`
+### 1.6 Auth on every route `[lifecycle]` `[design]`
 
 Bearer token in the `Authorization` header. `[client-utils]`'s `buildRequestHeaders` puts it nowhere
 else, with the comment that a query string and a body are both logged and cached where a header is
@@ -140,7 +163,7 @@ which is the classic JWT bypass. With no secret set the server falls back to an 
 where the token itself is the caller's identity — so the smoke script and the Postman collection work
 without a token issuer — and logs a warning saying exactly that at startup.
 
-### 1.6 `payload` must decode as `json.RawMessage`
+### 1.7 `payload` must decode as `json.RawMessage`
 
 `decodeJSON` in `internal/api/handlers.go` sets `DisallowUnknownFields()`, and that applies to nested
 structs too. If `payload` decodes into a typed duel struct, any field the widget adds later becomes a
@@ -192,7 +215,7 @@ proposed shape produces one the current client cannot call.
 | What the client sends today | `{participant, betRef}` — cannot fill `opponentSide.placement` (G1) | `{participant, payload}` — no `betRef`, no `expiresAt` (G2) |
 | What the route accepts | the above, **plus optional** `odd` and `placement{stake, lineItemId, dataVersion}` | `betRef` **required**, `expiresAt` optional |
 
-Because `decodeJSON` forbids unknown fields (§1.6), both had to be declared either way.
+Because `decodeJSON` forbids unknown fields (§1.7), both had to be declared either way.
 
 **Route 3 accepts the incomplete body and fills the room**, recording the derived entry as the
 joiner's stake and leaving `lineItemId`/`dataVersion` empty — visibly incomplete rather than
@@ -470,23 +493,30 @@ Carried generically at the room level `[lifecycle]`, but the service **writes in
 
 ```jsonc
 {
-  "marketId": "total_goals",
-  "marketItemId": "total_goals_2.5",
+  "marketId": { "eventId": "evt-ucl-final", "marketType": 5, "period": 0, "resultKind": 1 },
+  "marketItemId": { "marketParameters": ["2.5"] },
   "creatorSide": {
-    "outcomeId": "over",
+    "outcomeId": { "type": 3, "values": [] },
     "odd": 182,
     "placement": { "participantId": "p-1", "stake": 10.00, "lineItemId": "li-12", "dataVersion": 7 }
   },
-  "opponentSide": { "outcomeId": "under", "odd": 205 },
+  "opponentSide": { "outcomeId": { "type": 4, "values": [] }, "odd": 205 },
   "figures": { "payout": 18.20, "entry": 8.87, "pot": 18.87 },
   "winnerParticipantId": "p-1"
 }
 ```
 
-**The selection is a triple**: `marketId` + `marketItemId` + each side's `outcomeId`. The market and
-item sit at payload level, which is what structurally guarantees both sides are on the same line — a
-market holds many items, so a market id alone cannot tell Over 2.5 from Over 3.5 `[types]`
-`[findings]`.
+**The selection is a triple**: `marketId` + `marketItemId` + each side's `outcomeId`, each one a
+structured key rather than an opaque string (§1.4). The market and item sit at payload level, which
+is what structurally guarantees both sides are on the same line — a market holds many items, so a
+market id alone cannot tell Over 2.5 from Over 3.5 `[types]` `[findings]`.
+
+Validation follows from that shape. `marketId.eventId` is required; each side's `outcomeId` must be
+present, and an all-zero key (`type` 0 with no `values`) is how an absent one arrives, so it is
+rejected. **`marketItemId` has no presence check at all**: an empty `marketParameters` is what a
+parameterless market legitimately sends, so absent and valid are indistinguishable here. The two
+sides must still name different outcomes, compared field by field — a key holding a slice is not
+comparable with `==`, and nil and empty `values` are the same key.
 
 `creatorSide.placement` is **always** present: the room is created from a bet that already exists.
 `opponentSide.placement` appears only on confirm. `winnerParticipantId` is absent while settlement is
@@ -603,7 +633,7 @@ None of this has a precedent in the current skeleton.
 
 ### 5.1 Caller identity from the token
 
-The payload carries no user id by design (§1.5), so the service must extract a **subject** from the
+The payload carries no user id by design (§1.6), so the service must extract a **subject** from the
 bearer token and store it on each participant — **never returning it**. Four requirements depend on
 it and none can be met without it:
 
@@ -694,12 +724,12 @@ dependency rather than designed.
 market, or on an underround price pair. The widget's own guards are real but client-side, and
 `isDuelEligible` `[tasks]` runs in the browser.
 
-**Statuses these refusals would take**, so §1.4 is complete when they land: a market that is not
+**Statuses these refusals would take**, so §1.5 is complete when they land: a market that is not
 two-way at create → **400, proposed rather than spec-backed** — `[duel]` gives "no single opposite
 side" as the *reason*, but the status is a judgement call here, since a malformed selection is
 closest to a validation failure; the opposite outcome suspended or removed at acceptance → 409,
 rendering as "the market is no longer available" `[duel]`; an underround pair → 409, which is already
-in §1.4 because the guard is pure arithmetic on stored odds and is the one of the three the service
+in §1.5 because the guard is pure arithmetic on stored odds and is the one of the three the service
 can evaluate without a feed.
 
 Options for whoever picks this up, in order of preference:
@@ -838,7 +868,7 @@ safe; another caller's bet is a 409.
 
 **The room's `payload` is typed as the duel payload**, not carried as a raw document. The strategy
 seam is real at the request boundary — `payload` decodes as `json.RawMessage` so an unknown field is
-dropped rather than 400'd (§1.6) — but the stored field is a struct, because the service genuinely
+dropped rather than 400'd (§1.7) — but the stored field is a struct, because the service genuinely
 writes into it on confirm. A second strategy turns this into a union and a per-strategy decode; with
 one strategy that indirection would have no second consumer to justify it.
 

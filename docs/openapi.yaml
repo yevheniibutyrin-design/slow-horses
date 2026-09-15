@@ -821,13 +821,74 @@ components:
         payload:
           $ref: "#/components/schemas/DuelPayload"
 
+    MarketModel:
+      type: object
+      required: [eventId, marketType, period, resultKind]
+      description: |
+        The market half of the selection triple. Mirrors the widget's
+        MarketModelType field for field — an OBJECT, never an opaque string.
+      properties:
+        eventId:
+          type: string
+          example: evt-ucl-final
+        marketType:
+          type: integer
+          example: 5
+        period:
+          type: integer
+          example: 0
+        resultKind:
+          type: integer
+          example: 1
+        subPeriod:
+          type: integer
+          description: |
+            OMITTED rather than zeroed when the market has none: the widget
+            distinguishes "no sub-period" from "sub-period 0".
+          example: 1
+
+    MarketItemKey:
+      type: object
+      required: [marketParameters]
+      description: |
+        Names one item within a market — what tells Over 2.5 from Over 3.5.
+      properties:
+        marketParameters:
+          type: array
+          items:
+            type: string
+          description: |
+            Legitimately EMPTY for a parameterless market such as 1X2, so there is
+            no presence check on this key. Serialises as [] and NEVER as null: the
+            widget resolves a room's market by comparing JSON.stringify of this
+            list against an outcome id's values, where null equals nothing.
+          example: ["2.5"]
+
+    OutcomeKey:
+      type: object
+      required: [type, values]
+      description: |
+        Names one outcome within a market item. An all-zero key (type 0, no
+        values) is how an absent outcomeId arrives and is rejected.
+      properties:
+        type:
+          type: integer
+          example: 3
+        values:
+          type: array
+          items:
+            type: string
+          description: |
+            Legitimately empty, and serialises as [] rather than null for the same
+            reason as marketParameters.
+          example: []
+
     SideOffer:
       type: object
       required: [outcomeId, odd]
       properties:
         outcomeId:
-          type: string
-          example: over
+          $ref: "#/components/schemas/OutcomeKey"
         odd:
           type: integer
           description: |
@@ -906,17 +967,16 @@ components:
         struct here turns any future client field into a 400 on the one route whose
         job is to carry strategy data opaquely.
 
-        The selection is the TRIPLE marketId + marketItemId + a side's outcomeId.
+        The selection is the TRIPLE marketId + marketItemId + a side's outcomeId,
+        each one a STRUCTURED KEY and not an opaque string.
         The market and item sit at payload level, which structurally guarantees both
         sides are on the same line: a market holds many items, so a market id alone
         cannot tell Over 2.5 from Over 3.5.
       properties:
         marketId:
-          type: string
-          example: total_goals
+          $ref: "#/components/schemas/MarketModel"
         marketItemId:
-          type: string
-          example: total_goals_2.5
+          $ref: "#/components/schemas/MarketItemKey"
         creatorSide:
           allOf:
             - $ref: "#/components/schemas/SideOffer"

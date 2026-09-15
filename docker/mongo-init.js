@@ -50,14 +50,18 @@ const rooms = [
     createdAt: now,
     expiresAt: now + inviteWindow,
     payload: {
-      marketId: 'total_goals',
-      marketItemId: 'total_goals_2.5',
+      // The three selection keys are STRUCTURED objects, never opaque strings:
+      // marketId is the widget's MarketModelType, marketItemId and each
+      // outcomeId its key types. The lists inside them are [] and never null —
+      // the widget matches them by JSON.stringify, where null equals nothing.
+      marketId: { eventId: 'evt-ucl-2026-09-15', marketType: 5, period: 0, resultKind: 1 },
+      marketItemId: { marketParameters: ['2.5'] },
       creatorSide: {
-        outcomeId: 'over',
+        outcomeId: { type: 3, values: [] },
         odd: 182,
         placement: { participantId: 'p-seed-alice', stake: 1000, lineItemId: 'li-seed-1', dataVersion: 7 },
       },
-      opponentSide: { outcomeId: 'under', odd: 205 },
+      opponentSide: { outcomeId: { type: 4, values: [] }, odd: 205 },
       // payout = round(10.00 x 1.82) = 18.20; entry = floor(18.20 / 2.05) = 8.87.
       figures: { payout: 1820, entry: 887, pot: 1887 },
     },
@@ -93,15 +97,17 @@ const rooms = [
     createdAt: now - 10 * 60 * 1000,
     expiresAt: now + inviteWindow,
     payload: {
-      marketId: 'both_teams_to_score',
-      marketItemId: 'both_teams_to_score_main',
+      marketId: { eventId: 'evt-derby-2026-10-01', marketType: 8, period: 0, resultKind: 1 },
+      // Parameterless market: an EMPTY marketParameters is valid data, not a
+      // missing field.
+      marketItemId: { marketParameters: [] },
       creatorSide: {
-        outcomeId: 'yes',
+        outcomeId: { type: 1, values: [] },
         odd: 190,
         placement: { participantId: 'p-seed-carol', stake: 2000, lineItemId: 'li-seed-2', dataVersion: 4 },
       },
       opponentSide: {
-        outcomeId: 'no',
+        outcomeId: { type: 2, values: [] },
         odd: 195,
         placement: { participantId: 'p-seed-dave', stake: 1948, lineItemId: 'li-seed-3', dataVersion: 5 },
       },
@@ -131,14 +137,14 @@ const rooms = [
     createdAt: now - 2 * inviteWindow,
     expiresAt: now - inviteWindow,
     payload: {
-      marketId: 'total_goals',
-      marketItemId: 'total_goals_3.5',
+      marketId: { eventId: 'evt-2026-09-04', marketType: 5, period: 0, resultKind: 1 },
+      marketItemId: { marketParameters: ['3.5'] },
       creatorSide: {
-        outcomeId: 'over',
+        outcomeId: { type: 3, values: [] },
         odd: 260,
         placement: { participantId: 'p-seed-erin', stake: 500, lineItemId: 'li-seed-4', dataVersion: 2 },
       },
-      opponentSide: { outcomeId: 'under', odd: 148 },
+      opponentSide: { outcomeId: { type: 4, values: [] }, odd: 148 },
       // payout = round(5.00 x 2.60) = 13.00; entry = floor(13.00 / 1.48) = 8.78.
       figures: { payout: 1300, entry: 878, pot: 1378 },
     },
