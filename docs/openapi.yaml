@@ -732,7 +732,7 @@ components:
           example: 10
         playedToday:
           type: integer
-          example: 3
+          example: 0
         currency:
           type: string
           example: EUR
@@ -868,8 +868,9 @@ components:
       type: object
       required: [type, values]
       description: |
-        Names one outcome within a market item. An all-zero key (type 0, no
-        values) is how an absent outcomeId arrives and is rejected.
+        Names one outcome within a market item. Only an OMITTED outcomeId is
+        rejected: type 0 is a real outcome type — the first side of a 1X2 market
+        sends {"type": 0, "values": []} — so a zero key is valid data.
       properties:
         type:
           type: integer

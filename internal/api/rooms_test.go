@@ -128,6 +128,33 @@ func TestCreateRoomKeepsSelectionKeysStructured(t *testing.T) {
 	}
 }
 
+// Outcome type 0 is a REAL outcome type, not an absent field. The widget's
+// first side on a 1X2 market sends {"type":0,"values":[]}, and refusing that as
+// "outcomeId is required" rejected every duel opened on such a market — the
+// first thing a real betslip placement hit.
+func TestCreateRoomAcceptsOutcomeTypeZero(t *testing.T) {
+	e := newEnv(t)
+	body := createBody("evt-1x2", e.nowMS()+testInviteWindowMS, 132, 337, "5.00")
+	payload := body["payload"].(map[string]any)
+	payload["marketItemId"] = map[string]any{"marketParameters": []string{}}
+	payload["creatorSide"].(map[string]any)["outcomeId"] = outcomeID(0)
+
+	res := e.do(http.MethodPost, "/rooms", "alice", body)
+	if res.status != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body: %s", res.status, res.body)
+	}
+	var room models.Room
+	e.decode(res, http.StatusCreated, &room)
+
+	if room.Payload.CreatorSide.OutcomeID.Type != 0 {
+		t.Errorf("creator outcome type = %d, want 0 stored as sent",
+			room.Payload.CreatorSide.OutcomeID.Type)
+	}
+	if !strings.Contains(string(res.body), `"outcomeId":{"type":0,"values":[]}`) {
+		t.Errorf("a zero outcome key did not round-trip: %s", res.body)
+	}
+}
+
 func TestCreateRoomRefusals(t *testing.T) {
 	e := newEnv(t)
 	valid := func() map[string]any {
@@ -167,7 +194,8 @@ func TestCreateRoomRefusals(t *testing.T) {
 			b["payload"].(map[string]any)["marketId"].(map[string]any)["eventId"] = ""
 		}, http.StatusBadRequest, "invalidRequest", "the market half of the selection triple is unusable"},
 		{"no opponent outcome", func(b map[string]any) {
-			// An all-zero outcome key is what an absent outcomeId unmarshals to.
+			// Omitted entirely — the only form that is an absence. A zero key is
+			// valid data; see TestCreateRoomAcceptsOutcomeTypeZero.
 			delete(b["payload"].(map[string]any)["opponentSide"].(map[string]any), "outcomeId")
 		}, http.StatusBadRequest, "invalidRequest", "a side with no outcome is not a side"},
 		{"no creator placement", func(b map[string]any) {
