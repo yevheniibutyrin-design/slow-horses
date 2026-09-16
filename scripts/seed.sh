@@ -46,7 +46,12 @@ PING="$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/ping" || true)"
 N=0
 CREATED=0
 
-# subject | event | market | item | outcomeA | oddA | outcomeB | oddB | stake | label | initials | balances
+# subject | event | marketType | marketParameters | outcomeTypeA | oddA | outcomeTypeB | oddB | stake | label | initials | balances
+#
+# The three selection keys are STRUCTURED, not opaque strings: the market is a
+# MarketModelType (its eventId is the room's own event), the item is a list of
+# market parameters -- legitimately EMPTY for a parameterless market such as
+# 1X2 -- and each outcome is a type plus its own values.
 #
 # Odds are the feed's raw integers: 182 is 1.82. Every pair satisfies the
 # underround guard 100*(a+b) >= a*b, three of them at exact equality (200/200,
@@ -62,10 +67,11 @@ while IFS='|' read -r SUBJ EVENT MARKET ITEM OUTA ODDA OUTB ODDB STAKE LABEL INI
  "participant":{"label":"$LABEL","initials":"$INITIALS","balances":$BALANCES},
  "betRef":{"id":"bet-seed-$RUN-$N","number":$(( 20000 + N ))},
  "expiresAt":$EXPIRES,
- "payload":{"marketId":"$MARKET","marketItemId":"$ITEM",
-   "creatorSide":{"outcomeId":"$OUTA","odd":$ODDA,
+ "payload":{"marketId":{"eventId":"$EVENT","marketType":$MARKET,"period":0,"resultKind":1},
+   "marketItemId":{"marketParameters":$ITEM},
+   "creatorSide":{"outcomeId":{"type":$OUTA,"values":[]},"odd":$ODDA,
      "placement":{"stake":$STAKE,"lineItemId":"li-seed-$RUN-$N","dataVersion":1}},
-   "opponentSide":{"outcomeId":"$OUTB","odd":$ODDB}}}
+   "opponentSide":{"outcomeId":{"type":$OUTB,"values":[]},"odd":$ODDB}}}
 JSON
 )"
 
@@ -81,20 +87,20 @@ JSON
   ROOM="$(field "$RESP" id)"
   CODE="$(field "$RESP" inviteCode)"
   CREATED=$(( CREATED + 1 ))
-  printf '  %2d. %-16s %-20s %s @ %s vs %s  stake %-6s code %s\n' \
-    "$N" "$SUBJ" "$EVENT" "$OUTA" "$ODDA" "$ODDB" "$STAKE" "$CODE"
+  printf '  %2d. %-16s %-20s type %s @ %s vs type %s @ %s  stake %-6s code %s\n' \
+    "$N" "$SUBJ" "$EVENT" "$OUTA" "$ODDA" "$OUTB" "$ODDB" "$STAKE" "$CODE"
   printf '      %s\n' "$ROOM"
 done <<'TABLE'
-seed-alice  | evt-ucl-final     | total_goals      | total_goals_2.5   | over  | 182 | under | 205 | 10.00  | Maksym K.  | MK | {"eur":75.5}
-seed-bohdan | evt-ucl-final     | match_result     | match_result_1x2  | home  | 210 | away  | 190 | 25.00  | Ivan P.    | IP | {"eur":240.00}
-seed-olena  | evt-ucl-final     | both_teams_score | btts_main         | yes   | 200 | no    | 200 | 5.00   | Olena H.   | OH | {"eur":18.2,"bonus":5}
-seed-taras  | evt-ucl-final     | total_corners    | total_corners_9.5 | over  | 250 | under | 166 | 50.00  | Taras B.   | TB | {"eur":610}
-seed-iryna  | evt-derby-london  | match_result     | match_result_1x2  | home  | 190 | draw  | 195 | 15.00  | Iryna D.   | ID | {"eur":92.75}
-seed-alice  | evt-derby-london  | total_goals      | total_goals_3.5   | over  | 320 | under | 145 | 12.50  | Maksym K.  | MK | {"eur":75.5}
-seed-bohdan | evt-derby-london  | first_scorer     | first_scorer_any  | yes   | 350 | no    | 140 | 7.50   | Ivan P.    | IP | {"eur":240.00}
-seed-olena  | evt-open-final    | set_winner       | set_winner_1      | p1    | 133 | p2    | 400 | 100.00 | Olena H.   | OH | {"eur":18.2,"bonus":5}
-seed-taras  | evt-open-final    | total_games      | total_games_22.5  | over  | 290 | under | 152 | 20.00  | Taras B.   | TB | {"eur":610}
-seed-iryna  | evt-open-final    | match_result     | match_result_1x2  | home  | 125 | away  | 500 | 500.00 | Iryna D.   | ID | {"eur":92.75}
+seed-alice  | evt-ucl-final     |  5 | ["2.5"]  | 3 | 182 | 4 | 205 | 10.00  | Maksym K.  | MK | {"eur":75.5}
+seed-bohdan | evt-ucl-final     |  1 | []       | 1 | 210 | 3 | 190 | 25.00  | Ivan P.    | IP | {"eur":240.00}
+seed-olena  | evt-ucl-final     |  8 | []       | 1 | 200 | 2 | 200 | 5.00   | Olena H.   | OH | {"eur":18.2,"bonus":5}
+seed-taras  | evt-ucl-final     | 12 | ["9.5"]  | 3 | 250 | 4 | 166 | 50.00  | Taras B.   | TB | {"eur":610}
+seed-iryna  | evt-derby-london  |  1 | []       | 1 | 190 | 2 | 195 | 15.00  | Iryna D.   | ID | {"eur":92.75}
+seed-alice  | evt-derby-london  |  5 | ["3.5"]  | 3 | 320 | 4 | 145 | 12.50  | Maksym K.  | MK | {"eur":75.5}
+seed-bohdan | evt-derby-london  | 21 | []       | 1 | 350 | 2 | 140 | 7.50   | Ivan P.    | IP | {"eur":240.00}
+seed-olena  | evt-open-final    | 30 | ["1"]    | 1 | 133 | 3 | 400 | 100.00 | Olena H.   | OH | {"eur":18.2,"bonus":5}
+seed-taras  | evt-open-final    | 15 | ["22.5"] | 3 | 290 | 4 | 152 | 20.00  | Taras B.   | TB | {"eur":610}
+seed-iryna  | evt-open-final    |  1 | []       | 1 | 125 | 3 | 500 | 500.00 | Iryna D.   | ID | {"eur":92.75}
 TABLE
 
 say "Seeded $CREATED rooms"

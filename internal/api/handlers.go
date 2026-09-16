@@ -97,6 +97,14 @@ func (h *Handlers) roomView(room models.Room, subject string, showInviteCode boo
 	if view.Participants == nil {
 		view.Participants = []models.Participant{}
 	}
+	// The selection keys' lists are normalised on every read, not only on write:
+	// a nil slice marshals to JSON null, and the widget matches these lists with
+	// JSON.stringify, where null never equals []. A document that reached the
+	// collection by any other route than this service's own writes would
+	// otherwise serve a room that cannot resolve its own market.
+	view.Payload.MarketItemID.MarketParameters = stringList(view.Payload.MarketItemID.MarketParameters)
+	view.Payload.CreatorSide.OutcomeID = outcome(view.Payload.CreatorSide.OutcomeID)
+	view.Payload.OpponentSide.OutcomeID = outcome(view.Payload.OpponentSide.OutcomeID)
 	return view
 }
 

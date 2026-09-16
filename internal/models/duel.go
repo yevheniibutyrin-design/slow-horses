@@ -1,10 +1,44 @@
 package models
 
+// MarketModel is the market half of the selection triple. Mirrors the widget's
+// MarketModelType (sport-web-widgets, libs/types/src/markets.ts) field for field:
+// the widget sends these as an object and reads them back as one.
+type MarketModel struct {
+	EventID    string `json:"eventId"    bson:"eventId"`
+	MarketType int    `json:"marketType" bson:"marketType"`
+	Period     int    `json:"period"     bson:"period"`
+	ResultKind int    `json:"resultKind" bson:"resultKind"`
+	// SubPeriod is absent for most markets, so it is omitted rather than zeroed —
+	// the widget distinguishes "no sub-period" from "sub-period 0" when it matches
+	// a market model against a placed bet's outcome id.
+	SubPeriod *int `json:"subPeriod,omitempty" bson:"subPeriod,omitempty"`
+}
+
+// MarketItemKey names one item within a market — what tells Over 2.5 from Over
+// 3.5, and why a market id alone cannot identify the selection.
+//
+// MarketParameters is legitimately empty for a parameterless market such as
+// 1X2, so an empty slice is valid data, not a missing field. It must serialise
+// as `[]` and never as `null`: the widget resolves a room's own market by
+// comparing JSON.stringify(marketParameters) against an outcome id's values,
+// and `null` matches nothing.
+type MarketItemKey struct {
+	MarketParameters []string `json:"marketParameters" bson:"marketParameters"`
+}
+
+// OutcomeKey names one outcome within a market item. Values, like
+// MarketItemKey.MarketParameters, is legitimately empty and must serialise as
+// `[]` rather than `null` for the same reason.
+type OutcomeKey struct {
+	Type   int      `json:"type"   bson:"type"`
+	Values []string `json:"values" bson:"values"`
+}
+
 // SideOffer is one side of a duel as an offer: which outcome, at what price.
 // Both sides are known from creation, because the opposite side is the other
 // placeable outcome of the same market item.
 type SideOffer struct {
-	OutcomeID string `json:"outcomeId" bson:"outcomeId"`
+	OutcomeID OutcomeKey `json:"outcomeId" bson:"outcomeId"`
 	// Odd is the feed's RAW INTEGER price: 182 means 1.82. Kept as an integer
 	// server-side, which is what lets the underround guard be exact.
 	Odd int `json:"odd" bson:"odd"`
@@ -56,13 +90,15 @@ type Figures struct {
 
 // DuelPayload is the duel strategy's payload, carried by the room.
 //
-// The selection is the TRIPLE MarketID + MarketItemID + a side's OutcomeID. The
-// market and the item are held once at payload level, which is what structurally
-// guarantees both sides sit on the same line: a market holds many items, so a
-// market id alone cannot tell Over 2.5 from Over 3.5.
+// The selection is the TRIPLE MarketID + MarketItemID + a side's OutcomeID.
+// Each part is a STRUCTURED KEY rather than an opaque string — the widget
+// composes and reads them as objects. The market and the item are held once at
+// payload level, which is what structurally guarantees both sides sit on the
+// same line: a market holds many items, so a market id alone cannot tell
+// Over 2.5 from Over 3.5.
 type DuelPayload struct {
-	MarketID     string `json:"marketId"     bson:"marketId"`
-	MarketItemID string `json:"marketItemId" bson:"marketItemId"`
+	MarketID     MarketModel   `json:"marketId"     bson:"marketId"`
+	MarketItemID MarketItemKey `json:"marketItemId" bson:"marketItemId"`
 	// CreatorSide is always placed: a duel room is created from a bet that
 	// already exists, because the creator's stake is only known once the host bet
 	// slip has placed it.
