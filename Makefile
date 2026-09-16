@@ -10,7 +10,7 @@ BASE_URL ?= http://localhost:$(API_HOST_PORT)
 # Reused module cache so containerised go commands stay fast.
 GO_RUN = docker run --rm -v "$(PWD)":/src -w /src -v slow-horses-gomod:/go/pkg/mod $(GO_IMAGE)
 
-.PHONY: help up down restart logs ps watch reseed tidy vet build test smoke seed seed-fresh mongosh
+.PHONY: help up down stop start restart logs ps watch reseed tidy vet build test smoke seed seed-fresh mongosh
 
 help: ## Show available targets
 	@grep -hE '^[a-z-]+:.*##' $(firstword $(MAKEFILE_LIST)) | sed 's/:.*##/\t/' | awk -F'\t' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -21,6 +21,14 @@ up: ## Build and start api + mongo + swagger-ui
 
 down: ## Stop everything, keep the database volume
 	docker compose down
+
+stop: ## Stop the containers but keep them, so `make start` resumes in place
+	docker compose stop
+	docker compose ps
+
+start: ## Start containers stopped by `make stop`, without rebuilding
+	docker compose start
+	docker compose ps
 
 restart: ## Rebuild and restart just the API after a code change
 	docker compose up -d --build api
