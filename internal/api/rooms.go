@@ -72,9 +72,14 @@ type placementRequest struct {
 type sideRequest struct {
 	// The selection keys are the model types directly: plain data with matching
 	// JSON tags and no server-assigned fields, so there is nothing to strip.
-	OutcomeID models.OutcomeKey `json:"outcomeId"`
-	Odd       int               `json:"odd"`
-	Placement *placementRequest `json:"placement"`
+	//
+	// A POINTER, so an absent outcomeId is distinguishable from a present one
+	// that happens to be zero. Type 0 is a real outcome type in the feed — the
+	// first side of a 1X2 market sends exactly {"type":0,"values":[]} — so
+	// treating an all-zero key as "missing" refused legitimate duels.
+	OutcomeID *models.OutcomeKey `json:"outcomeId"`
+	Odd       int                `json:"odd"`
+	Placement *placementRequest  `json:"placement"`
 }
 
 type figuresRequest struct {
@@ -92,12 +97,6 @@ type duelPayloadRequest struct {
 	// WinnerParticipantID is accepted and ignored: it is written only by
 	// settlement, which no route performs.
 	WinnerParticipantID string `json:"winnerParticipantId"`
-}
-
-// emptyOutcome reports whether an outcome key is the unmarshalled form of an
-// absent field — all zero. A real outcome always names a type.
-func emptyOutcome(o models.OutcomeKey) bool {
-	return o.Type == 0 && len(o.Values) == 0
 }
 
 // sameOutcome compares two outcome keys. A struct holding a slice is not
@@ -154,11 +153,12 @@ func decodeDuelPayload(raw json.RawMessage) (models.DuelPayload, string) {
 	switch {
 	case trimmed(req.MarketID.EventID) == "":
 		return models.DuelPayload{}, "payload.marketId.eventId is required"
-	case emptyOutcome(req.CreatorSide.OutcomeID):
+	case req.CreatorSide.OutcomeID == nil:
 		return models.DuelPayload{}, "payload.creatorSide.outcomeId is required"
-	case emptyOutcome(req.OpponentSide.OutcomeID):
+	case req.OpponentSide.OutcomeID == nil:
 		return models.DuelPayload{}, "payload.opponentSide.outcomeId is required"
-	case sameOutcome(req.CreatorSide.OutcomeID, req.OpponentSide.OutcomeID):
+	// Safe to dereference: the two nil cases above are evaluated first.
+	case sameOutcome(*req.CreatorSide.OutcomeID, *req.OpponentSide.OutcomeID):
 		return models.DuelPayload{}, "the two sides of a duel must be different outcomes"
 	case req.CreatorSide.Odd < duel.MinRawOdd:
 		return models.DuelPayload{}, "payload.creatorSide.odd must be a raw integer price of at least 100 (1.00)"
@@ -182,7 +182,7 @@ func decodeDuelPayload(raw json.RawMessage) (models.DuelPayload, string) {
 		MarketID:     marketID,
 		MarketItemID: marketItemID,
 		CreatorSide: models.Side{
-			SideOffer: models.SideOffer{OutcomeID: outcome(req.CreatorSide.OutcomeID), Odd: req.CreatorSide.Odd},
+			SideOffer: models.SideOffer{OutcomeID: outcome(*req.CreatorSide.OutcomeID), Odd: req.CreatorSide.Odd},
 			Placement: &models.SidePlacement{
 				Stake:       req.CreatorSide.Placement.Stake,
 				LineItemID:  trimmed(req.CreatorSide.Placement.LineItemID),
@@ -190,7 +190,7 @@ func decodeDuelPayload(raw json.RawMessage) (models.DuelPayload, string) {
 			},
 		},
 		OpponentSide: models.Side{
-			SideOffer: models.SideOffer{OutcomeID: outcome(req.OpponentSide.OutcomeID), Odd: req.OpponentSide.Odd},
+			SideOffer: models.SideOffer{OutcomeID: outcome(*req.OpponentSide.OutcomeID), Odd: req.OpponentSide.Odd},
 		},
 	}
 	// Figures are not taken from the request. They are derived from the stake and

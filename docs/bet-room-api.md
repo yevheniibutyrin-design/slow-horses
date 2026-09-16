@@ -511,9 +511,10 @@ structured key rather than an opaque string (§1.4). The market and item sit at 
 is what structurally guarantees both sides are on the same line — a market holds many items, so a
 market id alone cannot tell Over 2.5 from Over 3.5 `[types]` `[findings]`.
 
-Validation follows from that shape. `marketId.eventId` is required; each side's `outcomeId` must be
-present, and an all-zero key (`type` 0 with no `values`) is how an absent one arrives, so it is
-rejected. **`marketItemId` has no presence check at all**: an empty `marketParameters` is what a
+Validation follows from that shape. `marketId.eventId` is required, and each side's `outcomeId` must
+be present — decoded into a **pointer**, so only an omitted key is refused. A zero key is valid data,
+not an absence: `type` 0 is a real outcome type, and the first side of a 1X2 market sends exactly
+`{"type": 0, "values": []}`. Rejecting all-zero keys refused those duels outright. **`marketItemId` has no presence check at all**: an empty `marketParameters` is what a
 parameterless market legitimately sends, so absent and valid are indistinguishable here. The two
 sides must still name different outcomes, compared field by field — a key holding a slice is not
 comparable with `==`, and nil and empty `values` are the same key.
